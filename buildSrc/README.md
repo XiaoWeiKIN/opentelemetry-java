@@ -1,0 +1,3325 @@
+# OpenTelemetry Java buildSrc 技术文档
+
+## 📑 目录
+
+- [概述](#概述)
+- [🚀 快速开始](#-快速开始)
+- [1. 目录结构和文件组织](#1-目录结构和文件组织)
+- [2. Gradle 构建脚本文件分析](#2-gradle-构建脚本文件分析)
+- [3. Convention Plugins（约定插件）](#3-convention-plugins约定插件)
+  - [3.1 otel.java-conventions](#31-oteljava-conventionsgradlekts)
+  - [3.2 otel.publish-conventions](#32-otelpublish-conventionsgradlekts)
+  - [3.3 otel.errorprone-conventions](#33-otelerrorprone-conventionsgradlekts)
+  - [3.4 otel.spotless-conventions](#34-otelspotless-conventionsgradlekts)
+  - [3.5 otel.jacoco-conventions](#35-oteljacoco-conventionsgradlekts)
+  - [3.6 otel.japicmp-conventions](#36-oteljapicmp-conventionsgradlekts)
+  - [3.7 otel.animalsniffer-conventions](#37-otelanimalsniffer-conventionsgradlekts) 📘
+  - [3.8 otel.bom-conventions](#38-otelbom-conventionsgradlekts) 📘
+  - [3.9 otel.protobuf-conventions](#39-otelprotobuf-conventionsgradlekts)
+  - [3.10 otel.jmh-conventions](#310-oteljmh-conventionsgradlekts)
+- [4. 自定义 Kotlin 类分析](#4-自定义-kotlin-类分析)
+- [5. 架构和设计模式](#5-架构和设计模式)
+- [6. 构建配置和依赖管理](#6-构建配置和依赖管理)
+- [7. 代码质量保证机制](#7-代码质量保证机制)
+- [8. 关键特性总结](#8-关键特性总结)
+- [9. 使用指南](#9-使用指南)
+- [10. 故障排查](#10-故障排查)
+- [11. 最佳实践](#11-最佳实践)
+- [12. 性能优化](#12-性能优化)
+- [13. 附录：otel.java-conventions 逐行详解](#13-附录oteljava-conventions-逐行详解)
+- [14. 扩展阅读](#14-扩展阅读)
+- [15. 维护者](#15-维护者)
+
+**图例**:
+- 📘 = 深度指南（包含详细示例、故障排查和最佳实践）
+
+---
+
+## 🚀 快速开始
+
+### 常用插件速查
+
+| 插件 | 用途 | 章节 |
+|------|------|------|
+| `otel.java-conventions` | Java 基础配置（必需） | [3.1](#31-oteljava-conventionsgradlekts) |
+| `otel.publish-conventions` | Maven 发布配置 | [3.2](#32-otelpublish-conventionsgradlekts) |
+| `otel.errorprone-conventions` | 静态代码分析 | [3.3](#33-otelerrorprone-conventionsgradlekts) |
+| `otel.animalsniffer-conventions` | Android API 兼容性检查 | [3.7](#37-otelanimalsniffer-conventionsgradlekts) 📘 |
+| `otel.bom-conventions` | BOM 项目配置 | [3.8](#38-otelbom-conventionsgradlekts) 📘 |
+
+### 常见任务快速导航
+
+- **创建新模块**: 参考 [9. 使用指南](#9-使用指南)
+- **发布到 Maven Central**: 参考 [3.2 发布配置](#32-otelpublish-conventionsgradlekts)
+- **检查 API 兼容性**: 参考 [3.6 JApiCmp](#36-oteljapicmp-conventionsgradlekts)
+- **配置 Android 兼容性**: 参考 [3.7 AnimalSniffer 📘](#37-otelanimalsniffer-conventionsgradlekts)
+- **管理 BOM 版本**: 参考 [3.8 BOM 约定 📘](#38-otelbom-conventionsgradlekts)
+- **故障排查**: 参考 [10. 故障排查](#10-故障排查)
+
+---
+
+## 概述
+
+本文档详细分析了 OpenTelemetry Java 项目的 `buildSrc` 模块，这是一个自包含的 Gradle 构建系统，提供了可重用的构建逻辑、约定插件和自定义工具。
+
+**项目统计**:
+- **源文件数量**: 16 个（11 个 Gradle 约定插件 + 5 个自定义 Kotlin 类）
+- **代码量**: 约 1600+ 行
+- **架构模式**: Convention Plugins（约定插件）
+
+---
+
+## 1. 目录结构和文件组织
+
+buildSrc 采用标准的 Gradle 构建源码项目结构：
+
+```
+buildSrc/
+├── build.gradle.kts                          # buildSrc 自身的构建配置
+├── build/                                     # 编译输出目录
+│   ├── classes/kotlin/main/                  # 编译后的 class 文件
+│   ├── generated-sources/                    # Gradle 生成的源码
+│   │   ├── kotlin-dsl-accessors/            # DSL 访问器
+│   │   ├── kotlin-dsl-external-plugin-spec-builders/
+│   │   └── kotlin-dsl-plugins/              # 插件包装类
+│   ├── libs/buildSrc.jar                     # 打包后的 jar
+│   └── pluginDescriptors/                    # 插件描述符文件（10个）
+└── src/main/kotlin/                          # 源代码目录
+    ├── io/opentelemetry/gradle/              # 自定义类和插件
+    │   ├── OtelBomExtension.kt              # BOM 扩展配置
+    │   ├── OtelJavaExtension.kt             # Java 模块扩展配置
+    │   ├── OtelVersionClassPlugin.kt        # 版本类生成插件
+    │   ├── ProtoFieldsWireHandler.kt        # Protobuf 字段处理器
+    │   └── ProtoFieldsWireHandlerFactory.kt # 处理器工厂
+    └── *.gradle.kts                          # 10个约定插件脚本
+```
+
+---
+
+**相关章节**:
+- → 下一节: [2. Gradle 构建脚本文件分析](#2-gradle-构建脚本文件分析)
+- ↑ 返回目录: [目录](#📑-目录)
+
+---
+
+## 2. Gradle 构建脚本文件分析
+
+### 2.1 buildSrc/build.gradle.kts
+
+这是 buildSrc 模块自身的构建配置文件。
+
+**主要功能**:
+- 配置 buildSrc 的依赖和插件
+- 为约定插件提供必要的类路径依赖
+
+**关键依赖**:
+```kotlin
+plugins {
+    `kotlin-dsl`  // 支持使用 Kotlin 编写 Gradle 脚本
+}
+
+dependencies {
+    implementation("com.diffplug.spotless:spotless-plugin-gradle:8.1.0")        // 代码格式化
+    implementation("com.squareup.wire:wire-gradle-plugin:5.4.0")                 // Protobuf 编译
+    implementation("net.ltgt.gradle:gradle-errorprone-plugin:4.3.0")            // 静态代码分析
+    implementation("me.champeau.jmh:jmh-gradle-plugin:0.7.3")                   // 性能基准测试
+    implementation("me.champeau.gradle:japicmp-gradle-plugin:0.4.6")            // API 兼容性检查
+    implementation("org.owasp:dependency-check-gradle:12.1.9")                   // 安全漏洞扫描
+    implementation("ru.vyarus:gradle-animalsniffer-plugin:2.0.1")               // Java API 版本检查
+}
+```
+
+**代码规范配置**:
+使用 Spotless 插件格式化 Kotlin 代码，配置了 ktlint 并禁用了部分严格规则：
+```kotlin
+spotless {
+    kotlin {
+        ktlint().editorConfigOverride(mapOf(
+            "ktlint_standard_no-wildcard-imports" to "disabled",
+            "ktlint_standard_max-line-length" to "disabled",
+            // ... 更多规则
+        ))
+    }
+}
+```
+
+---
+
+**相关章节**:
+- ← 上一节: [1. 目录结构和文件组织](#1-目录结构和文件组织)
+- → 下一节: [3. Convention Plugins（约定插件）](#3-convention-plugins约定插件)
+- ↑ 返回目录: [目录](#📑-目录)
+
+---
+
+## 3. Convention Plugins（约定插件）
+
+项目定义了 10 个约定插件，每个插件负责特定的构建关注点：
+
+### 3.1 otel.java-conventions.gradle.kts
+
+**文件路径**: `src/main/kotlin/otel.java-conventions.gradle.kts`
+
+**核心功能**: Java 项目的基础配置，是其他约定插件的基础。
+
+**主要配置**:
+
+#### Java 工具链配置
+```kotlin
+java {
+    toolchain {
+        languageVersion.set(JavaLanguageVersion.of(21))  // 使用 Java 21 编译
+    }
+}
+
+// 最小支持版本通过 otelJava.minJavaVersionSupported 动态配置（默认 Java 8）
+tasks.withType<JavaCompile>().configureEach {
+    release.set(otelJava.minJavaVersionSupported.map { it.majorVersion.toInt() })
+}
+```
+
+#### 依赖的其他约定插件
+- `otel.errorprone-conventions` - 静态代码分析
+- `otel.jacoco-conventions` - 代码覆盖率
+- `otel.spotless-conventions` - 代码格式化
+
+#### Checkstyle 配置
+```kotlin
+checkstyle {
+    toolVersion = "13.0.0"
+    configFile = rootProject.file("buildscripts/checkstyle.xml")
+}
+```
+
+#### 依赖安全检查
+使用 OWASP dependency-check 扫描依赖漏洞：
+```kotlin
+dependencyCheck {
+    failBuildOnCVSS = 7.0f  // CVSS 7.0+ 漏洞会导致构建失败
+}
+```
+
+#### 测试配置
+```kotlin
+tasks.withType<Test>().configureEach {
+    useJUnitPlatform()
+
+    // CI 环境自动重试失败的测试（最多2次）
+    if (System.getenv("CI") != null) {
+        retry {
+            maxRetries.set(2)
+        }
+    }
+
+    // 预加载 Mockito 代理（解决 Java 21+ 动态加载警告）
+    jvmArgs("-XX:+EnableDynamicAgentLoading")
+}
+```
+
+#### JAR 清单配置
+```kotlin
+tasks.withType<Jar>().configureEach {
+    manifest {
+        attributes(
+            "Automatic-Module-Name" to otelJava.moduleName.get(),
+            "Implementation-Version" to project.version
+        )
+    }
+}
+```
+
+#### 可重现构建
+```kotlin
+tasks.withType<AbstractArchiveTask>().configureEach {
+    isPreserveFileTimestamps = false  // 禁用时间戳
+    isReproducibleFileOrder = true    // 标准化文件顺序
+}
+```
+
+#### 版本资源生成
+自动生成 `version.properties` 文件：
+```kotlin
+val generateVersionResource by tasks.registering(WriteProperties::class) {
+    outputFile = file("${layout.buildDirectory.get()}/generated/version.properties")
+    property("version", project.version)
+}
+```
+
+---
+
+### 3.2 otel.publish-conventions.gradle.kts
+
+**文件路径**: `src/main/kotlin/otel.publish-conventions.gradle.kts`
+
+**核心功能**: Maven 发布配置，包括 POM 元数据、签名和 API 兼容性检查。
+
+**Maven 发布配置**:
+```kotlin
+publishing {
+    publications {
+        register<MavenPublication>("maven") {
+            groupId = "io.opentelemetry"
+
+            pom {
+                name.set(project.name)
+                description.set("OpenTelemetry Java SDK")
+                url.set("https://github.com/open-telemetry/opentelemetry-java")
+
+                licenses {
+                    license {
+                        name.set("The Apache License, Version 2.0")
+                        url.set("http://www.apache.org/licenses/LICENSE-2.0.txt")
+                    }
+                }
+
+                developers {
+                    developer {
+                        id.set("opentelemetry")
+                        name.set("OpenTelemetry")
+                        url.set("https://github.com/open-telemetry/community")
+                    }
+                }
+
+                scm {
+                    connection.set("scm:git:git@github.com:open-telemetry/opentelemetry-java.git")
+                    developerConnection.set("scm:git:git@github.com:open-telemetry/opentelemetry-java.git")
+                    url.set("git@github.com:open-telemetry/opentelemetry-java.git")
+                }
+            }
+        }
+    }
+}
+```
+
+**GPG 签名配置**（仅在 CI 环境启用）:
+```kotlin
+if (System.getenv("CI") != null) {
+    signing {
+        useInMemoryPgpKeys(
+            System.getenv("GPG_PRIVATE_KEY"),
+            System.getenv("GPG_PASSWORD")
+        )
+        sign(publishing.publications["maven"])
+    }
+}
+```
+
+**OkHttp 依赖替换**:
+解决 Maven 兼容性问题，将 `okhttp` 替换为 `okhttp-jvm`：
+```kotlin
+configurations.all {
+    resolutionStrategy.dependencySubstitution {
+        substitute(module("com.squareup.okhttp3:okhttp"))
+            .using(module("com.squareup.okhttp3:okhttp-jvm:4.12.0"))
+    }
+}
+```
+
+**依赖的其他约定插件**:
+- `otel.japicmp-conventions` - API 兼容性检查
+
+---
+
+### 3.3 otel.errorprone-conventions.gradle.kts
+
+**文件路径**: `src/main/kotlin/otel.errorprone-conventions.gradle.kts`
+
+**核心功能**: 集成 Google ErrorProne 和 NullAway 进行静态代码分析。
+
+**ErrorProne 配置**:
+```kotlin
+dependencies {
+    errorprone("com.google.errorprone:error_prone_core")
+    errorprone("com.uber.nullaway:nullaway")
+    errorprone(project(":custom-checks"))  // 自定义检查规则
+}
+```
+
+**NullAway 空指针检查**（仅对主代码启用）:
+```kotlin
+tasks.named<JavaCompile>("compileJava") {
+    options.errorprone.nullaway {
+        annotatedPackages.add("io.opentelemetry")
+        severity.set(CheckSeverity.ERROR)
+    }
+}
+```
+
+**自定义契约注解**:
+```kotlin
+options.errorprone {
+    option("Errorprone:CustomContract", "io.opentelemetry.api.internal.Contract")
+}
+```
+
+**禁用的检查规则**（约 20 个）:
+```kotlin
+options.errorprone.disable(
+    "YodaCondition",
+    "StringSplitter",
+    "EqualsHashCode",
+    "InlineFormatString",
+    // ... 更多规则
+)
+```
+
+---
+
+### 3.4 otel.spotless-conventions.gradle.kts
+
+**文件路径**: `src/main/kotlin/otel.spotless-conventions.gradle.kts`
+
+**核心功能**: 多语言代码格式化和许可证头管理。
+
+**Java 格式化**:
+```kotlin
+spotless {
+    java {
+        googleJavaFormat()  // 使用 Google Java Format
+        licenseHeaderFile(rootProject.file("buildscripts/spotless.license.java"))
+    }
+}
+```
+
+**Kotlin 格式化**:
+```kotlin
+spotless {
+    kotlin {
+        ktlint().editorConfigOverride(mapOf(
+            "ktlint_standard_no-wildcard-imports" to "disabled",
+            "ktlint_standard_max-line-length" to "disabled",
+            // ... 更多规则
+        ))
+    }
+}
+```
+
+**支持的语言**:
+- Java (Google Java Format)
+- Kotlin (ktlint)
+- Groovy (Groovy Eclipse)
+- Scala (scalafmt)
+
+**格式规范化**（对多种文件类型）:
+```kotlin
+format("misc") {
+    target("*.md", ".gitignore", "*.sh", "*.properties")
+    trimTrailingWhitespace()
+    indentWithSpaces(2)
+    endWithNewline()
+}
+```
+
+---
+
+### 3.5 otel.jacoco-conventions.gradle.kts
+
+**文件路径**: `src/main/kotlin/otel.jacoco-conventions.gradle.kts`
+
+**核心功能**: JaCoCo 代码覆盖率配置，支持多项目聚合报告。
+
+**JaCoCo 版本**:
+```kotlin
+jacoco {
+    toolVersion = "0.8.14"
+}
+```
+
+**自定义配置**（用于多项目聚合）:
+```kotlin
+val transitiveSourceElements by configurations.creating {
+    isCanBeResolved = false
+    isCanBeConsumed = true
+    attributes {
+        attribute(Usage.USAGE_ATTRIBUTE, objects.named(Usage.JAVA_RUNTIME))
+        attribute(Category.CATEGORY_ATTRIBUTE, objects.named(Category.DOCUMENTATION))
+    }
+}
+
+val coverageDataElements by configurations.creating {
+    isCanBeResolved = false
+    isCanBeConsumed = true
+    attributes {
+        attribute(Usage.USAGE_ATTRIBUTE, objects.named(Usage.JAVA_RUNTIME))
+        attribute(Category.CATEGORY_ATTRIBUTE, objects.named(Category.VERIFICATION))
+    }
+}
+```
+
+---
+
+### 3.6 otel.japicmp-conventions.gradle.kts
+
+**文件路径**: `src/main/kotlin/otel.japicmp-conventions.gradle.kts`
+
+**核心功能**: API 二进制兼容性检查，对比当前版本与最新发布版本。
+
+**自动发现最新发布版本**:
+```kotlin
+val latestReleasedVersion: String by lazy {
+    val versions = configurations.create("latestReleasedVersion") {
+        resolutionStrategy.componentSelection {
+            all {
+                if (candidate.version.contains("-alpha") ||
+                    candidate.version.contains("-beta") ||
+                    candidate.version.contains("-rc")) {
+                    reject("Rejecting pre-release version")
+                }
+            }
+        }
+    }
+    versions.resolve().first().version
+}
+```
+
+**自定义兼容性规则**:
+```kotlin
+// 允许 AutoValue 类添加抽象方法
+rule("AllowNewAbstractMethodOnAutovalueClasses") {
+    // ...
+}
+
+// 禁止源码不兼容的变更
+rule("SourceIncompatibleRule") {
+    // ...
+}
+```
+
+**排除内部包**:
+```kotlin
+packageExcludes.addAll(listOf("*.internal", "*.internal.*"))
+```
+
+**生成 API diff 报告**:
+报告输出到 `docs/apidiffs/` 目录，便于审查 API 变更。
+
+---
+
+### 3.7 otel.animalsniffer-conventions.gradle.kts
+
+**文件路径**: `src/main/kotlin/otel.animalsniffer-conventions.gradle.kts:1`
+
+**核心功能**: 检查代码是否使用了目标 Java 版本不支持的 API，特别是 Android 平台的 API 兼容性检查。
+
+#### 快速概览
+
+Animal Sniffer 是一个 Gradle 插件，用于确保代码只使用指定 Java 版本或 Android API 级别支持的类和方法。通过比对签名文件，在编译时捕获 API 兼容性问题。
+
+**基本配置**:
+```kotlin
+plugins {
+  `java-library`
+  id("ru.vyarus.animalsniffer")
+}
+
+dependencies {
+  signature(project(path = ":animal-sniffer-signature", configuration = "generatedSignature"))
+}
+
+animalsniffer {
+  sourceSets = listOf(java.sourceSets.main.get())  // 仅检查主源码
+}
+
+tasks.withType<AnimalSniffer> {
+  reports.text.required.set(true)  // 生成文本报告
+}
+```
+
+**常见用法**:
+```bash
+# 检查 API 兼容性
+./gradlew :sdk:metrics:animalsnifferMain
+
+# 查看签名文件内容
+./gradlew :animal-sniffer-signature:printSignature
+
+# 跳过检查
+./gradlew build -x animalsnifferMain
+```
+
+#### 核心概念
+
+**工作流程**:
+```
+源代码 → 编译为 class 文件 → AnimalSniffer 扫描 → 比对签名文件 → 报告不兼容 API
+```
+
+**为什么需要**:
+- Java 编译器不检查运行时 API 可用性
+- Android API 与 Java API 不完全一致
+- 编译成功的代码可能在旧版 Android 上崩溃
+
+**OpenTelemetry 的配置**:
+- 目标平台：Android API 23 (Android 6.0)
+- 使用 Android Desugar 库向后移植部分 Java 8+ API
+- 自定义签名文件：`:animal-sniffer-signature` 模块
+
+#### 签名文件生成
+
+OpenTelemetry 项目自定义签名文件，合并了：
+1. **Android API 23 标准 API** (`gummy-bears-api-23`)
+2. **Android Desugar 库** (`desugar_jdk_libs`) - 向后移植 `java.time.*`、`Optional` 等
+
+**支持的 Desugar API**:
+- `java.time.Duration`, `Instant`
+- `java.util.Optional`
+- `java.util.stream.*`
+- `java.util.function.*`
+
+**不支持的 API**:
+- `java.nio.file.Files` / `Path` (需要 API 26+)
+
+#### 使用示例
+
+**启用 AnimalSniffer**:
+```kotlin
+plugins {
+    id("otel.java-conventions")
+    id("otel.animalsniffer-conventions")  // 启用检查
+}
+```
+
+**检测不兼容 API**:
+```bash
+./gradlew :sdk:metrics:animalsnifferMain
+
+# 输出:
+# Undefined reference: java.nio.file.Files
+#   at io.opentelemetry.sdk.metrics.MetricsExporter:8
+```
+
+**修复方案**:
+1. 使用 Desugar 支持的 API（`Duration` 替代自定义实现）
+2. 使用 `@IgnoreJRERequirement` 注解抑制检查
+3. 完全避免不兼容 API（使用 Java 7 兼容 API）
+
+#### 常见问题
+
+**1. 签名文件找不到**
+```kotlin
+// 确保 settings.gradle.kts 包含
+include(":animal-sniffer-signature")
+```
+
+**2. 内部 API 报错** (`sun.misc.Unsafe`)
+```java
+@IgnoreJRERequirement  // 显式抑制
+public void useUnsafe() { ... }
+```
+
+**3. 跳过特定模块检查**
+```bash
+./gradlew :sdk:metrics:build -x animalsnifferMain
+```
+
+#### 与其他工具的对比
+
+| 工具 | 用途 | 检查时机 |
+|------|------|----------|
+| AnimalSniffer | API 兼容性 | 编译后 |
+| ErrorProne | 静态分析 | 编译时 |
+| JApiCmp | API 向后兼容 | 发布前 |
+
+#### 📘 完整指南
+
+本节为精简版本。完整的深度指南（包含 10+ 个详细示例、Android Desugar 深度解析、完整的故障排查指南和最佳实践）请参考：
+
+**➤ [AnimalSniffer 完整指南](docs/animalsniffer-guide.md)** 📘
+
+**完整指南包含**:
+- 详细的工作原理和架构
+- Android Desugar 库的深度解析
+- 签名文件生成的完整流程
+- 10+ 个实际使用场景和修复方案
+- 完整的调试和故障排查指南
+- 性能优化和最佳实践
+- 与其他工具的详细对比
+
+---
+
+**相关章节**:
+- ← 上一节: [3.6 otel.japicmp-conventions](#36-oteljapicmp-conventionsgradlekts)
+- → 下一节: [3.8 otel.bom-conventions](#38-otelbom-conventionsgradlekts)
+- ↑ 返回目录: [目录](#📑-目录)
+
+---
+
+### 3.8 otel.bom-conventions.gradle.kts
+
+**文件路径**: `src/main/kotlin/otel.bom-conventions.gradle.kts:1`
+
+**核心功能**: BOM（Bill of Materials）项目配置，自动收集所有可发布的子项目，生成依赖约束和复合构建替换文件。
+
+#### 快速概览
+
+BOM（物料清单）用于集中管理多模块项目的版本。OpenTelemetry Java 维护两个 BOM：
+- **stable BOM** (`opentelemetry-bom`): 稳定 API
+- **alpha BOM** (`opentelemetry-bom-alpha`): 实验性 API（继承 stable BOM）
+
+**基本配置**:
+```kotlin
+plugins {
+  id("otel.bom-conventions")
+  id("java-platform")
+}
+
+// 配置项目过滤器
+otelBom.projectFilter.set { !it.hasProperty("otel.release") }  // Stable BOM
+// 或
+otelBom.projectFilter.set { it.findProperty("otel.release") == "alpha" }  // Alpha BOM
+```
+
+**使用 BOM（外部项目）**:
+```kotlin
+dependencies {
+  // 导入 BOM，统一管理版本
+  implementation(platform("io.opentelemetry:opentelemetry-bom:1.35.0"))
+  
+  // 不需要指定版本（由 BOM 管理）
+  implementation("io.opentelemetry:opentelemetry-api")
+  implementation("io.opentelemetry:opentelemetry-sdk")
+}
+```
+
+**常见任务**:
+```bash
+# 查看 BOM 包含的项目
+./gradlew :bom:dependencies --configuration apiElements
+
+# 生成复合构建替换文件
+./gradlew generateBuildSubstitutions
+```
+
+#### 核心概念
+
+**BOM 工作原理**:
+```
+用户项目声明依赖（无版本） → Gradle 查找 BOM 约束 → 解析版本 → 下载 JAR
+```
+
+**OpenTelemetry 的 BOM 架构**:
+```
+opentelemetry-bom (stable)
+    ↓ 继承
+opentelemetry-bom-alpha (alpha + stable)
+```
+
+**插件配置要点**:
+1. **命名验证**: BOM 项目名必须以 `bom` 开头
+2. **项目评估顺序**: 使用 `evaluationDependsOn` 确保子项目先完成配置
+3. **项目筛选**: 通过 `projectFilter` 过滤要包含的项目
+4. **依赖约束**: 自动为筛选出的项目添加 `api` 约束
+
+#### BOM 项目实例
+
+**Stable BOM** (`bom/build.gradle.kts`):
+```kotlin
+plugins {
+  id("otel.bom-conventions")
+}
+
+description = "OpenTelemetry Bill of Materials"
+group = "io.opentelemetry"
+base.archivesName.set("opentelemetry-bom")
+
+// 包含没有 otel.release 属性的项目（稳定项目）
+otelBom.projectFilter.set { !it.hasProperty("otel.release") }
+```
+
+**Alpha BOM** (`bom-alpha/build.gradle.kts`):
+```kotlin
+plugins {
+  id("otel.bom-conventions")
+}
+
+description = "OpenTelemetry Bill of Materials (Alpha)"
+group = "io.opentelemetry"
+base.archivesName.set("opentelemetry-bom-alpha")
+
+// 仅包含 otel.release = "alpha" 的项目
+otelBom.projectFilter.set { it.findProperty("otel.release") == "alpha" }
+
+// 允许依赖其他 BOM
+javaPlatform.allowDependencies()
+
+dependencies {
+  // 继承 stable BOM
+  api(platform(project(":bom")))
+}
+```
+
+#### generateBuildSubstitutions 任务
+
+用于本地开发的复合构建（composite build），避免每次修改都要 `publishToMavenLocal`。
+
+**生成替换文件**:
+```bash
+./gradlew generateBuildSubstitutions
+
+# 输出: bom/build/substitutions.gradle.kts
+# 内容: substitute(module("io.opentelemetry:opentelemetry-api")).using(project(":api:all"))
+```
+
+**使用复合构建**:
+```kotlin
+// settings.gradle.kts
+includeBuild("/path/to/opentelemetry-java") {
+  dependencySubstitution {
+    // 粘贴生成的替换代码
+    substitute(module("io.opentelemetry:opentelemetry-api")).using(project(":api:all"))
+    // ... 更多替换
+  }
+}
+```
+
+**优势**: 修改 OpenTelemetry 代码后，你的项目自动使用最新代码，无需重新发布。
+
+#### 项目筛选逻辑
+
+```
+所有子项目
+    ↓ sortedBy archivesName (确保顺序稳定)
+    ↓ filter: !name.startsWith("bom") (排除 BOM 项目)
+    ↓ filter: otelBom.projectFilter.get()::test (应用自定义过滤器)
+    ↓ filter: plugins.hasPlugin("maven-publish") (仅可发布项目)
+    ↓
+最终包含在 BOM 中的项目列表
+```
+
+#### 标记项目为 Alpha
+
+```kotlin
+// api/incubator/build.gradle.kts
+plugins {
+  id("otel.java-conventions")
+  id("otel.publish-conventions")
+}
+
+extensions.extraProperties["otel.release"] = "alpha"  // 标记为 alpha
+```
+
+#### 使用示例
+
+**示例 1: 消费 Stable BOM**
+```kotlin
+dependencies {
+  implementation(platform("io.opentelemetry:opentelemetry-bom:1.35.0"))
+  implementation("io.opentelemetry:opentelemetry-api")  // 版本由 BOM 管理
+  implementation("io.opentelemetry:opentelemetry-sdk")
+}
+```
+
+**示例 2: 消费 Alpha BOM**
+```kotlin
+dependencies {
+  implementation(platform("io.opentelemetry:opentelemetry-bom-alpha:1.35.0"))
+  implementation("io.opentelemetry:opentelemetry-api")  // stable API
+  implementation("io.opentelemetry:opentelemetry-api-incubator")  // alpha API
+}
+```
+
+**示例 3: 本地开发（复合构建）**
+```bash
+# 1. 生成替换文件
+./gradlew generateBuildSubstitutions
+
+# 2. 在你的项目 settings.gradle.kts 中配置
+includeBuild("/path/to/opentelemetry-java") {
+  dependencySubstitution {
+    // 粘贴 bom/build/substitutions.gradle.kts 的内容
+  }
+}
+
+# 3. 构建你的项目（自动使用 OpenTelemetry 源码）
+./gradlew build
+```
+
+#### 常见问题
+
+**1. 为什么项目没有包含在 BOM 中？**
+检查：
+- 项目名不能以 "bom" 开头
+- 必须有 `maven-publish` 插件
+- 满足 `projectFilter` 条件
+
+**2. 查看 BOM 包含的所有项目**
+```bash
+./gradlew :bom:dependencies --configuration apiElements
+```
+
+**3. 复合构建版本冲突**
+确保 OpenTelemetry 项目版本与你项目声明的版本一致。
+
+#### 📘 完整指南
+
+本节为精简版本。完整的深度指南（包含 BOM 工作原理详解、版本映射策略、发布流程、架构图等）请参考：
+
+**➤ [BOM 约定完整指南](docs/bom-guide.md)** 📘
+
+**完整指南包含**:
+- BOM 的详细工作原理和架构
+- Maven BOM vs Gradle Platform 对比
+- 完整的配置详解（65 行源码逐行解析）
+- BOM 继承机制和版本解析流程
+- generateBuildSubstitutions 任务的详细实现
+- 10+ 个使用示例和场景
+- 完整的调试和故障排查指南
+- 发布到 Maven Central 的流程
+- 性能优化和最佳实践
+- 架构图和流程图
+
+#### 核心价值
+
+**BOM 约定插件的价值**:
+- ✅ **自动化版本管理**: 自动收集 50+ 模块并生成约束
+- ✅ **分层架构**: 支持 stable/alpha 多级 BOM
+- ✅ **开发者友好**: 生成复合构建替换文件
+- ✅ **灵活过滤**: 支持自定义项目筛选逻辑
+- ✅ **标准兼容**: 生成标准 Maven BOM，兼容 Maven 和 Gradle
+
+---
+
+**相关章节**:
+- ← 上一节: [3.7 otel.animalsniffer-conventions](#37-otelanimalsniffer-conventionsgradlekts)
+- → 下一节: [3.9 otel.protobuf-conventions](#39-otelprotobuf-conventionsgradlekts)
+- ↑ 返回目录: [目录](#📑-目录)
+
+---
+### 3.9 otel.protobuf-conventions.gradle.kts
+
+**文件路径**: `src/main/kotlin/otel.protobuf-conventions.gradle.kts`
+
+**核心功能**: Protobuf 编译配置，使用 Wire 和 gRPC 插件。
+
+**Wire 配置**:
+```kotlin
+wire {
+    kotlin {
+        javaInterop = true
+    }
+
+    // 使用自定义处理器生成轻量级字段信息
+    custom {
+        schemaHandlerFactoryClass = "io.opentelemetry.gradle.ProtoFieldsWireHandlerFactory"
+    }
+}
+```
+
+**gRPC 插件配置**:
+```kotlin
+dependencies {
+    compileProtoPath("io.grpc:grpc-protobuf:${project.findProperty("grpcVersion")}")
+}
+```
+
+**版本管理**:
+```kotlin
+val protocVersion = project.findProperty("protocVersion")
+val grpcVersion = project.findProperty("grpcVersion")
+```
+
+---
+
+### 3.10 otel.jmh-conventions.gradle.kts
+
+**文件路径**: `src/main/kotlin/otel.jmh-conventions.gradle.kts`
+
+**核心功能**: JMH（Java Microbenchmark Harness）性能基准测试配置。
+
+**JMH 配置**:
+```kotlin
+jmh {
+    profilers.add("gc")  // 启用 GC profiler
+
+    // 支持单类基准测试
+    if (project.hasProperty("jmhIncludeSingleClass")) {
+        includes.add(project.property("jmhIncludeSingleClass") as String)
+    }
+}
+```
+
+**HTML 报告生成**:
+```kotlin
+tasks.register("jmhReport") {
+    dependsOn("jmh")
+    doLast {
+        // 生成 HTML 报告
+    }
+}
+```
+
+**支持不同 Java 版本测试**:
+```kotlin
+if (project.hasProperty("testJavaVersion")) {
+    val testJavaVersion = project.property("testJavaVersion") as String
+    javaLauncher.set(javaToolchains.launcherFor {
+        languageVersion.set(JavaLanguageVersion.of(testJavaVersion))
+    })
+}
+```
+
+---
+
+## 4. 自定义 Kotlin 类分析
+
+### 4.1 OtelJavaExtension.kt
+
+**文件路径**: `src/main/kotlin/io/opentelemetry/gradle/OtelJavaExtension.kt`
+
+**行数**: 19 行
+
+**功能**: Gradle 扩展，为 Java 项目提供配置 DSL。
+
+**源码**:
+```kotlin
+abstract class OtelJavaExtension(objects: ObjectFactory) {
+    val moduleName: Property<String> = objects.property(String::class.java)
+    val minJavaVersionSupported: Property<JavaVersion> = objects.property(JavaVersion::class.java)
+        .convention(JavaVersion.VERSION_1_8)
+}
+```
+
+**使用示例**:
+```kotlin
+otelJava {
+    moduleName.set("io.opentelemetry.api")
+    minJavaVersionSupported.set(JavaVersion.VERSION_1_8)
+}
+```
+
+**两个属性**:
+1. `moduleName`: Java 模块名（用于 JAR 清单的 `Automatic-Module-Name`）
+2. `minJavaVersionSupported`: 最小支持的 Java 版本（默认 Java 8）
+
+---
+
+### 4.2 OtelBomExtension.kt
+
+**文件路径**: `src/main/kotlin/io/opentelemetry/gradle/OtelBomExtension.kt`
+
+**行数**: 14 行
+
+**功能**: BOM 项目的扩展配置。
+
+**源码**:
+```kotlin
+abstract class OtelBomExtension(objects: ObjectFactory) {
+    val projectFilter: Property<(Project) -> Boolean> = objects.property()
+        .convention { true }
+}
+```
+
+**使用示例**:
+```kotlin
+otelBom {
+    projectFilter.set { project ->
+        !project.name.contains("alpha")  // 排除 alpha 版本项目
+    }
+}
+```
+
+---
+
+### 4.3 OtelVersionClassPlugin.kt
+
+**文件路径**: `src/main/kotlin/io/opentelemetry/gradle/OtelVersionClassPlugin.kt`
+
+**行数**: 89 行
+
+**功能**: 自定义 Gradle 插件，生成包含版本信息的 Java 类。
+
+**关键逻辑**:
+```kotlin
+class OtelVersionClassPlugin : Plugin<Project> {
+    override fun apply(project: Project) {
+        val generateVersionClass = project.tasks.register<GenerateVersionClass>("generateVersionClass") {
+            version.set(project.version.toString())
+            className.set("${project.group}/${project.name}/internal/OtelVersion")
+        }
+
+        project.tasks.named("compileJava") {
+            dependsOn(generateVersionClass)
+        }
+    }
+}
+
+abstract class GenerateVersionClass : DefaultTask() {
+    @get:Input
+    abstract val version: Property<String>
+
+    @get:Input
+    abstract val className: Property<String>
+
+    @get:OutputFile
+    abstract val outputFile: RegularFileProperty
+
+    @TaskAction
+    fun generate() {
+        val packageName = className.get().substringBeforeLast('/')
+        val simpleClassName = className.get().substringAfterLast('/')
+
+        outputFile.get().asFile.writeText("""
+            package ${packageName.replace('/', '.')};
+
+            import javax.annotation.Generated;
+
+            @Generated("io.opentelemetry.gradle.OtelVersionClassPlugin")
+            public final class $simpleClassName {
+                public static final String VERSION = "${version.get()}";
+                private $simpleClassName() {}
+            }
+        """.trimIndent())
+    }
+}
+```
+
+**生成的代码示例**:
+```java
+package io.opentelemetry.api.internal;
+
+import javax.annotation.Generated;
+
+@Generated("io.opentelemetry.gradle.OtelVersionClassPlugin")
+public final class OtelVersion {
+    public static final String VERSION = "1.35.0";
+    private OtelVersion() {}
+}
+```
+
+**集成到编译流程**:
+- `compileJava` 依赖此任务
+- `sourcesJar` 包含生成的源码
+
+---
+
+### 4.4 ProtoFieldsWireHandler.kt
+
+**文件路径**: `src/main/kotlin/io/opentelemetry/gradle/ProtoFieldsWireHandler.kt`
+
+**行数**: 228 行
+
+**功能**: Wire 编译器的自定义处理器，为 Protobuf 定义生成精简的字段信息类。
+
+**设计目标**:
+- 仅生成字段编号和枚举值（不生成完整的消息类）
+- 减少生成代码体积
+- 符合 Protobuf wire 格式规范
+
+**生成两种类型**:
+
+#### Message 字段信息
+生成 `ProtoFieldInfo` 字段：
+```kotlin
+data class ProtoFieldInfo(
+    val tag: Int,           // Protobuf tag (field_number << 3 | wire_type)
+    val jsonName: String    // JSON 序列化名称
+)
+```
+
+#### Enum 值信息
+生成 `ProtoEnumInfo` 字段：
+```kotlin
+data class ProtoEnumInfo(
+    val value: Int,         // 枚举值
+    val name: String        // 枚举名称
+)
+```
+
+**关键算法 - Tag 计算**:
+```kotlin
+private fun makeTag(fieldNumber: Int, type: ProtoType, isRepeated: Boolean): Int {
+    return (fieldNumber shl 3) or fieldEncoding(type, isRepeated)
+}
+
+private fun fieldEncoding(type: ProtoType, isRepeated: Boolean): Int {
+    if (isRepeated && type.isScalar) {
+        return WIRETYPE_LENGTH_DELIMITED  // 2
+    }
+    return when (type) {
+        ProtoType.INT32, ProtoType.INT64, ProtoType.UINT32, ProtoType.UINT64,
+        ProtoType.SINT32, ProtoType.SINT64, ProtoType.BOOL, ProtoType.ENUM ->
+            WIRETYPE_VARINT  // 0
+
+        ProtoType.FIXED64, ProtoType.SFIXED64, ProtoType.DOUBLE ->
+            WIRETYPE_FIXED64  // 1
+
+        ProtoType.STRING, ProtoType.BYTES, ProtoType.MESSAGE ->
+            WIRETYPE_LENGTH_DELIMITED  // 2
+
+        ProtoType.FIXED32, ProtoType.SFIXED32, ProtoType.FLOAT ->
+            WIRETYPE_FIXED32  // 5
+
+        else -> throw IllegalArgumentException("Unknown type: $type")
+    }
+}
+```
+
+这遵循 Protobuf wire 格式规范：**tag = (field_number << 3) | wire_type**
+
+**生成的代码示例**:
+```java
+package io.opentelemetry.proto.trace.v1.internal;
+
+public final class SpanProtoFieldInfo {
+    public static final ProtoFieldInfo TRACE_ID = new ProtoFieldInfo(10, "traceId");
+    public static final ProtoFieldInfo SPAN_ID = new ProtoFieldInfo(18, "spanId");
+    public static final ProtoFieldInfo NAME = new ProtoFieldInfo(26, "name");
+    public static final ProtoFieldInfo KIND = new ProtoFieldInfo(32, "kind");
+
+    private SpanProtoFieldInfo() {}
+}
+```
+
+**Wire Type 常量**:
+```kotlin
+const val WIRETYPE_VARINT = 0              // int32, int64, uint32, uint64, sint32, sint64, bool, enum
+const val WIRETYPE_FIXED64 = 1             // fixed64, sfixed64, double
+const val WIRETYPE_LENGTH_DELIMITED = 2    // string, bytes, embedded messages, packed repeated fields
+const val WIRETYPE_FIXED32 = 5             // fixed32, sfixed32, float
+```
+
+---
+
+### 4.5 ProtoFieldsWireHandlerFactory.kt
+
+**文件路径**: `src/main/kotlin/io/opentelemetry/gradle/ProtoFieldsWireHandlerFactory.kt`
+
+**行数**: 17 行
+
+**功能**: `SchemaHandler.Factory` 的实现，创建 `ProtoFieldsWireHandler` 实例。
+
+**源码**:
+```kotlin
+class ProtoFieldsWireHandlerFactory : SchemaHandler.Factory {
+    override fun create(
+        includes: List<String>,
+        excludes: List<String>,
+        exclusive: Boolean,
+        outDirectory: String,
+        options: Map<String, String>,
+        sourcePathPaths: SourcePathPaths
+    ): SchemaHandler {
+        return ProtoFieldsWireHandler(
+            outDirectory = outDirectory,
+            sourcePathPaths = sourcePathPaths
+        )
+    }
+}
+```
+
+**在 Wire 插件中的使用**:
+```kotlin
+wire {
+    custom {
+        schemaHandlerFactoryClass = "io.opentelemetry.gradle.ProtoFieldsWireHandlerFactory"
+    }
+}
+```
+
+---
+
+## 5. 架构和设计模式
+
+### 5.1 设计模式
+
+#### 1. Convention Over Configuration（约定优于配置）
+- **实现**: 10 个约定插件封装了最佳实践
+- **优势**: 子项目只需应用插件，无需重复配置
+- **示例**:
+```kotlin
+// 子项目只需一行配置
+plugins {
+    id("otel.java-conventions")
+}
+// 自动获得：Checkstyle、ErrorProne、Spotless、JaCoCo、测试配置等
+```
+
+#### 2. Plugin 模式
+- **实现**: 每个约定插件都是独立的 Gradle 插件
+- **优势**: 可以选择性应用（如 jmh、protobuf 仅用于特定模块）
+- **示例**:
+```kotlin
+plugins {
+    id("otel.java-conventions")      // 所有 Java 项目
+    id("otel.publish-conventions")   // 需要发布的项目
+    id("otel.jmh-conventions")       // 性能测试项目
+}
+```
+
+#### 3. Extension Object 模式
+- **实现**: `OtelJavaExtension` 和 `OtelBomExtension` 提供声明式配置 DSL
+- **优势**: 类型安全、IDE 自动完成支持
+- **示例**:
+```kotlin
+otelJava {
+    moduleName.set("io.opentelemetry.api")
+    minJavaVersionSupported.set(JavaVersion.VERSION_1_8)
+}
+```
+
+#### 4. Factory 模式
+- **实现**: `ProtoFieldsWireHandlerFactory` 创建处理器实例
+- **优势**: 解耦创建逻辑和使用逻辑
+- **示例**: Wire 插件通过工厂类名创建处理器
+
+#### 5. Template Method 模式
+- **实现**: `ProtoFieldsWireHandler` 继承 `SchemaHandler`，覆盖特定方法
+- **优势**: 复用 Wire 编译器的框架，只实现自定义逻辑
+
+---
+
+### 5.2 架构层次
+
+```
+┌─────────────────────────────────────────┐
+│  Root Project (settings.gradle.kts)     │
+└─────────────────┬───────────────────────┘
+                  │
+┌─────────────────▼───────────────────────┐
+│  buildSrc (编译为 buildSrc.jar)          │
+│  ┌───────────────────────────────────┐  │
+│  │ Convention Plugins Layer          │  │
+│  │ - java-conventions               │  │
+│  │ - publish-conventions            │  │
+│  │ - errorprone/spotless/jacoco     │  │
+│  │ - japicmp/animalsniffer          │  │
+│  │ - bom/protobuf/jmh               │  │
+│  └───────────────────────────────────┘  │
+│  ┌───────────────────────────────────┐  │
+│  │ Custom Classes & Plugins          │  │
+│  │ - OtelVersionClassPlugin         │  │
+│  │ - ProtoFieldsWireHandler         │  │
+│  │ - Extensions (OtelJava, OtelBom) │  │
+│  └───────────────────────────────────┘  │
+└─────────────────┬───────────────────────┘
+                  │
+┌─────────────────▼───────────────────────┐
+│  Subprojects (api, sdk, exporters...)   │
+│  apply plugin: "otel.java-conventions"  │
+└─────────────────────────────────────────┘
+```
+
+---
+
+### 5.3 插件依赖关系
+
+```
+otel.java-conventions (核心)
+├── otel.errorprone-conventions
+├── otel.jacoco-conventions
+└── otel.spotless-conventions
+
+otel.publish-conventions
+└── otel.japicmp-conventions
+
+otel.bom-conventions
+└── otel.publish-conventions
+
+otel.protobuf-conventions
+└── otel.java-conventions
+
+otel.jmh-conventions
+└── (独立)
+
+otel.animalsniffer-conventions
+└── (独立，需要 java-library)
+```
+
+**依赖说明**:
+- **核心插件**: `otel.java-conventions` 是基础，大多数插件依赖它
+- **发布链**: `publish-conventions` → `japicmp-conventions`
+- **独立插件**: `jmh` 和 `animalsniffer` 可独立使用
+
+---
+
+## 6. 构建配置和依赖管理
+
+### 6.1 统一依赖版本管理
+
+项目使用中心化的依赖版本管理：
+
+```kotlin
+// 通过 :dependencyManagement 项目集中管理
+dependencies {
+    implementation(platform(project(":dependencyManagement")))
+}
+
+// 所有可解析配置自动继承依赖管理
+configurations.configureEach {
+    if (isCanBeResolved) {
+        extendsFrom(configurations["dependencyManagement"])
+    }
+}
+```
+
+**优势**:
+- 单一来源的版本真理（Single Source of Truth）
+- 避免版本冲突
+- 统一升级依赖版本
+
+---
+
+### 6.2 依赖冲突策略
+
+```kotlin
+configurations.all {
+    resolutionStrategy {
+        failOnVersionConflict()  // 版本冲突时构建失败（而非静默选择）
+        preferProjectModules()   // 优先使用项目模块（而非外部依赖）
+    }
+}
+```
+
+**说明**:
+- **failOnVersionConflict**: 确保所有依赖版本明确，避免隐式版本选择
+- **preferProjectModules**: 复合构建时优先使用本地项目
+
+---
+
+### 6.3 安全配置
+
+#### OWASP Dependency Check
+```kotlin
+dependencyCheck {
+    failBuildOnCVSS = 7.0f  // CVSS 7.0+ 漏洞会导致构建失败
+
+    // 需要 NVD API 密钥
+    nvd {
+        apiKey = System.getenv("NVD_API_KEY")
+    }
+
+    // 排除特定配置（如测试依赖）
+    skipConfigurations = listOf("testRuntimeClasspath")
+}
+```
+
+**CVSS 评分等级**:
+- **0.0-3.9**: Low（低危）
+- **4.0-6.9**: Medium（中危）
+- **7.0-8.9**: High（高危） ← **构建失败阈值**
+- **9.0-10.0**: Critical（严重）
+
+---
+
+## 7. 代码质量保证机制
+
+| 工具 | 用途 | 配置位置 | 何时运行 |
+|------|------|----------|----------|
+| **ErrorProne** | 静态代码分析 | errorprone-conventions | 编译时 |
+| **NullAway** | 空指针检查 | errorprone-conventions | 编译时（仅主代码） |
+| **Checkstyle** | 代码风格 | java-conventions | 构建时 |
+| **Spotless** | 格式化 | spotless-conventions | 提交前 / CI |
+| **JaCoCo** | 代码覆盖率 | jacoco-conventions | 测试后 |
+| **JApiCmp** | API 兼容性 | japicmp-conventions | 发布前 |
+| **AnimalSniffer** | Java API 兼容性 | animalsniffer-conventions | 构建时 |
+| **JMH** | 性能基准测试 | jmh-conventions | 手动运行 |
+| **OWASP** | 安全漏洞扫描 | java-conventions | 构建时 / CI |
+
+### 质量门禁（Quality Gates）
+
+构建过程中的质量检查点：
+
+```
+代码提交
+    ↓
+Spotless 格式检查 ────✗──→ 构建失败
+    ↓ ✓
+Checkstyle 风格检查 ──✗──→ 构建失败
+    ↓ ✓
+ErrorProne 静态分析 ──✗──→ 构建失败
+    ↓ ✓
+编译（Java 21 → Java 8）
+    ↓ ✓
+NullAway 空指针检查 ──✗──→ 编译失败
+    ↓ ✓
+单元测试 + JaCoCo ────✗──→ 构建失败
+    ↓ ✓
+AnimalSniffer API 检查 ─✗──→ 构建失败
+    ↓ ✓
+OWASP 安全扫描 ───────✗──→ 构建失败（CVSS >= 7.0）
+    ↓ ✓
+JApiCmp 兼容性检查 ───✗──→ 发布失败
+    ↓ ✓
+构建成功 / 发布
+```
+
+---
+
+## 8. 关键特性总结
+
+### 8.1 可重现构建（Reproducible Builds）
+
+**配置**:
+```kotlin
+tasks.withType<AbstractArchiveTask>().configureEach {
+    isPreserveFileTimestamps = false  // 禁用时间戳
+    isReproducibleFileOrder = true    // 标准化文件顺序
+}
+```
+
+**意义**:
+- 相同源码在不同环境产生字节级相同的构建产物
+- 便于验证构建完整性和安全性
+- 支持分布式缓存和增量构建
+
+---
+
+### 8.2 多 Java 版本测试
+
+**支持的参数**:
+```bash
+# 使用 Java 17 运行测试
+./gradlew test -PtestJavaVersion=17
+
+# 使用 Java 21 运行测试
+./gradlew test -PtestJavaVersion=21
+```
+
+**实现**:
+```kotlin
+tasks.withType<Test>().configureEach {
+    if (project.hasProperty("testJavaVersion")) {
+        val testJavaVersion = project.property("testJavaVersion") as String
+        javaLauncher.set(javaToolchains.launcherFor {
+            languageVersion.set(JavaLanguageVersion.of(testJavaVersion))
+        })
+    }
+}
+```
+
+---
+
+### 8.3 CI 集成优化
+
+#### 自动测试重试
+```kotlin
+if (System.getenv("CI") != null) {
+    test {
+        retry {
+            maxRetries.set(2)  // 失败测试最多重试2次
+        }
+    }
+}
+```
+
+#### 仅在 CI 启用 GPG 签名
+```kotlin
+if (System.getenv("CI") != null) {
+    signing {
+        useInMemoryPgpKeys(
+            System.getenv("GPG_PRIVATE_KEY"),
+            System.getenv("GPG_PASSWORD")
+        )
+        sign(publishing.publications["maven"])
+    }
+}
+```
+
+#### 依赖检查跳过特定配置
+```kotlin
+dependencyCheck {
+    skipConfigurations = listOf(
+        "testRuntimeClasspath",
+        "jmhRuntimeClasspath"
+    )
+}
+```
+
+---
+
+### 8.4 自动化版本生成
+
+**OtelVersionClassPlugin** 自动生成版本类：
+```java
+// 自动生成到每个模块的 internal 包
+package io.opentelemetry.api.internal;
+
+public final class OtelVersion {
+    public static final String VERSION = "1.35.0";
+}
+```
+
+**使用场景**:
+- 运行时获取库版本
+- 日志和调试信息
+- User-Agent 头
+
+---
+
+### 8.5 轻量级 Protobuf 支持
+
+**ProtoFieldsWireHandler** 生成精简的字段信息：
+
+**传统方式**（生成完整消息类）:
+```java
+// 生成的代码 ~500 行
+public class Span {
+    private String traceId;
+    private String spanId;
+    // ... 大量样板代码
+
+    public static class Builder { ... }
+    public void writeTo(OutputStream out) { ... }
+    // ...
+}
+```
+
+**轻量级方式**（仅生成字段信息）:
+```java
+// 生成的代码 ~20 行
+public final class SpanProtoFieldInfo {
+    public static final ProtoFieldInfo TRACE_ID = new ProtoFieldInfo(10, "traceId");
+    public static final ProtoFieldInfo SPAN_ID = new ProtoFieldInfo(18, "spanId");
+    // ...
+}
+```
+
+**优势**:
+- 减少 90%+ 的生成代码
+- 更快的编译速度
+- 更小的 JAR 体积
+- 仍可用于手动序列化/反序列化
+
+---
+
+### 8.6 复合构建支持
+
+**BOM 生成依赖替换脚本**:
+```kotlin
+// 执行任务生成复合构建配置
+./gradlew :bom:generateBuildSubstitutions
+
+// 输出（可复制到 settings.gradle.kts）：
+dependencySubstitution {
+    substitute(module("io.opentelemetry:opentelemetry-api")).using(project(":api"))
+    substitute(module("io.opentelemetry:opentelemetry-sdk")).using(project(":sdk"))
+    // ... 所有子项目
+}
+```
+
+**使用场景**:
+- 在依赖项目中使用本地源码（而非已发布版本）
+- 跨仓库开发和调试
+
+---
+
+## 9. 使用指南
+
+### 9.1 为新模块应用约定插件
+
+**典型 Java 模块**:
+```kotlin
+// build.gradle.kts
+plugins {
+    id("otel.java-conventions")
+}
+
+otelJava {
+    moduleName.set("io.opentelemetry.exporter.otlp")
+}
+
+dependencies {
+    implementation(project(":api"))
+    // ...
+}
+```
+
+**需要发布的模块**:
+```kotlin
+plugins {
+    id("otel.java-conventions")
+    id("otel.publish-conventions")
+}
+```
+
+**性能测试模块**:
+```kotlin
+plugins {
+    id("otel.java-conventions")
+    id("otel.jmh-conventions")
+}
+```
+
+**Protobuf 模块**:
+```kotlin
+plugins {
+    id("otel.java-conventions")
+    id("otel.protobuf-conventions")
+}
+```
+
+---
+
+### 9.2 常用 Gradle 任务
+
+```bash
+# 编译所有项目
+./gradlew build
+
+# 运行测试
+./gradlew test
+
+# 检查代码格式
+./gradlew spotlessCheck
+
+# 自动格式化代码
+./gradlew spotlessApply
+
+# 生成 JaCoCo 覆盖率报告
+./gradlew jacocoTestReport
+
+# 检查 API 兼容性
+./gradlew japicmp
+
+# 检查依赖漏洞
+./gradlew dependencyCheckAnalyze
+
+# 运行 JMH 基准测试
+./gradlew jmh
+
+# 发布到本地 Maven 仓库
+./gradlew publishToMavenLocal
+
+# 发布到远程仓库
+./gradlew publish
+```
+
+---
+
+### 9.3 自定义约定插件
+
+如需添加新的约定插件：
+
+1. **创建插件脚本**:
+```kotlin
+// buildSrc/src/main/kotlin/otel.my-convention.gradle.kts
+plugins {
+    id("java")
+}
+
+// 配置逻辑
+tasks.register("myCustomTask") {
+    // ...
+}
+```
+
+2. **应用到子项目**:
+```kotlin
+// 子项目的 build.gradle.kts
+plugins {
+    id("otel.my-convention")
+}
+```
+
+3. **注册插件描述符**（自动）:
+Gradle 会自动生成 `build/pluginDescriptors/otel.my-convention.properties`
+
+---
+
+## 10. 故障排查
+
+### 10.1 常见问题
+
+#### 问题：ErrorProne 编译失败
+```
+error: [SomeCheck] ...
+```
+
+**解决**:
+1. 检查 `otel.errorprone-conventions.gradle.kts` 中是否禁用了该检查
+2. 如果是误报，添加 `@SuppressWarnings("SomeCheck")` 注解
+3. 或在插件中禁用：
+```kotlin
+options.errorprone.disable("SomeCheck")
+```
+
+#### 问题：Spotless 格式检查失败
+```
+The following files had format violations:
+    src/main/java/Foo.java
+```
+
+**解决**:
+```bash
+# 自动格式化
+./gradlew spotlessApply
+```
+
+#### 问题：JApiCmp 报告 API 不兼容
+```
+Class Foo: Method bar() has been removed
+```
+
+**解决**:
+1. 如果是有意的破坏性变更，更新版本号（major version bump）
+2. 如果是内部 API，确保类在 `*.internal` 包中
+3. 如果是误报，在 `japicmp-conventions` 中添加排除规则
+
+#### 问题：依赖安全扫描失败
+```
+One or more dependencies were identified with known vulnerabilities:
+CVE-2024-XXXX (CVSS: 8.5)
+```
+
+**解决**:
+1. 升级受影响的依赖版本
+2. 如果无法升级，评估风险后添加抑制规则：
+```kotlin
+dependencyCheck {
+    suppressionFile = "config/dependency-suppression.xml"
+}
+```
+
+---
+
+### 10.2 调试技巧
+
+#### 查看 ErrorProne 详细错误
+```bash
+./gradlew compileJava --info
+```
+
+#### 查看依赖树
+```bash
+./gradlew dependencies
+./gradlew dependencies --configuration runtimeClasspath
+```
+
+#### 查看应用的插件
+```bash
+./gradlew :some-project:plugins
+```
+
+#### 查看所有任务
+```bash
+./gradlew tasks --all
+```
+
+#### 调试 Gradle 构建
+```bash
+./gradlew build --debug > gradle-debug.log 2>&1
+```
+
+---
+
+## 11. 最佳实践
+
+### 11.1 添加新依赖
+
+**DO**（推荐）:
+```kotlin
+dependencies {
+    // 使用平台管理版本
+    implementation("com.google.guava:guava")
+
+    // 仅在必要时指定版本
+    testImplementation("org.mockito:mockito-core:5.8.0")
+}
+```
+
+**DON'T**（不推荐）:
+```kotlin
+dependencies {
+    // 避免在每个模块重复指定版本
+    implementation("com.google.guava:guava:32.1.3-jre")
+}
+```
+
+---
+
+### 11.2 编写测试
+
+**DO**（推荐）:
+```java
+@Test
+void shouldReturnEmptyWhenNoData() {
+    // Given
+    DataSource dataSource = new EmptyDataSource();
+
+    // When
+    Optional<Data> result = dataSource.getData();
+
+    // Then
+    assertThat(result).isEmpty();
+}
+```
+
+**关键点**:
+- 使用 JUnit 5（Jupiter）
+- 使用 AssertJ 断言（`assertThat`）
+- 测试方法名清晰描述行为
+- Given-When-Then 结构
+
+---
+
+### 11.3 添加新模块
+
+1. **创建模块目录**:
+```bash
+mkdir -p new-module/src/main/java
+mkdir -p new-module/src/test/java
+```
+
+2. **创建 build.gradle.kts**:
+```kotlin
+plugins {
+    id("otel.java-conventions")
+}
+
+otelJava {
+    moduleName.set("io.opentelemetry.newmodule")
+}
+
+dependencies {
+    api(project(":api"))
+    implementation("com.google.guava:guava")
+
+    testImplementation(project(":sdk:testing"))
+}
+```
+
+3. **在 settings.gradle.kts 中注册**:
+```kotlin
+include(":new-module")
+```
+
+4. **验证**:
+```bash
+./gradlew :new-module:build
+```
+
+---
+
+## 12. 性能优化
+
+### 12.1 构建缓存
+
+**启用本地缓存**（已默认启用）:
+```kotlin
+// gradle.properties
+org.gradle.caching=true
+```
+
+**启用远程缓存**（CI 环境）:
+```kotlin
+// settings.gradle.kts
+buildCache {
+    remote<HttpBuildCache> {
+        url = uri("https://cache.example.com/")
+        isPush = System.getenv("CI") != null
+    }
+}
+```
+
+---
+
+### 12.2 并行构建
+
+**启用并行执行**:
+```bash
+./gradlew build --parallel --max-workers=8
+```
+
+**在 gradle.properties 中永久启用**:
+```properties
+org.gradle.parallel=true
+org.gradle.workers.max=8
+```
+
+---
+
+### 12.3 配置缓存
+
+**启用配置缓存**（Gradle 8.0+）:
+```bash
+./gradlew build --configuration-cache
+```
+
+**注意**: 配置缓存对 buildSrc 的某些插件可能不兼容，需要逐步适配。
+
+---
+
+## 13. 附录：otel.java-conventions.gradle.kts 逐行详解
+
+本节提供 `otel.java-conventions.gradle.kts` 文件的完整逐行分析，这是 buildSrc 中最核心的约定插件。
+
+**文件信息**:
+- **文件路径**: `buildSrc/src/main/kotlin/otel.java-conventions.gradle.kts:1`
+- **文件行数**: 299 行
+- **作用**: 为所有 Java 模块提供统一的构建配置
+
+---
+
+### 13.1 导入声明（第 1-3 行）
+
+```kotlin
+import io.opentelemetry.gradle.OtelJavaExtension
+import org.gradle.api.JavaVersion
+import org.gradle.api.tasks.testing.logging.TestExceptionFormat
+```
+
+**解析**:
+- `OtelJavaExtension`: 自定义扩展类，提供 `moduleName` 和 `minJavaVersionSupported` 配置
+- `JavaVersion`: Gradle 标准类，用于 Java 版本比较和配置
+- `TestExceptionFormat`: 测试日志格式枚举，控制异常输出格式
+
+---
+
+### 13.2 插件声明（第 5-16 行）
+
+```kotlin
+plugins {
+  `java-library`
+  checkstyle
+  eclipse
+  idea
+  id("otel.errorprone-conventions")
+  id("otel.jacoco-conventions")
+  id("otel.spotless-conventions")
+  id("org.owasp.dependencycheck")
+}
+```
+
+#### 核心插件
+
+**`java-library`**:
+- 提供 Java 库项目的基础功能
+- 支持 `api` 和 `implementation` 依赖配置
+- 与 `java` 插件的区别：
+```kotlin
+// java-library 提供
+dependencies {
+    api("com.google.guava:guava")           // 传递给消费者
+    implementation("org.slf4j:slf4j-api")   // 不传递
+}
+```
+
+**`checkstyle`**: Google Java Style 代码风格检查（版本 13.0.0）
+
+**`eclipse` 和 `idea`**: 生成 IDE 项目文件
+
+#### 自定义约定插件
+
+- `otel.errorprone-conventions`: ErrorProne 静态分析 + NullAway 空指针检查
+- `otel.jacoco-conventions`: JaCoCo 代码覆盖率
+- `otel.spotless-conventions`: 代码格式化 + Apache 2.0 许可证头
+
+#### 安全插件
+
+**`org.owasp.dependencycheck`**:
+- 扫描依赖的已知安全漏洞（基于 NVD 数据库）
+- CVSS >= 7.0 的漏洞会导致构建失败
+
+---
+
+### 13.3 扩展配置（第 18 行）
+
+```kotlin
+val otelJava = extensions.create<OtelJavaExtension>("otelJava")
+```
+
+创建名为 `otelJava` 的扩展对象，子项目可通过 DSL 配置：
+
+```kotlin
+otelJava {
+    moduleName.set("io.opentelemetry.api")
+    minJavaVersionSupported.set(JavaVersion.VERSION_1_8)
+}
+```
+
+---
+
+### 13.4 归档命名规范（第 20-26 行）
+
+```kotlin
+base {
+  if (!archivesName.get().startsWith("opentelemetry-")) {
+    archivesName.set("opentelemetry-$name")
+  }
+}
+```
+
+**解析**:
+- 统一归档命名：`opentelemetry-<模块名>`
+- 避免重复添加前缀（父项目可能已设置）
+- 生成的 JAR 文件名示例：`opentelemetry-api-1.35.0.jar`
+
+---
+
+### 13.5 可重现构建配置（第 28-33 行）
+
+```kotlin
+// normalize timestamps and file ordering in jars, making the outputs reproducible
+// see open-telemetry/opentelemetry-java#4488
+tasks.withType<AbstractArchiveTask>().configureEach {
+  isPreserveFileTimestamps = false
+  isReproducibleFileOrder = true
+}
+```
+
+#### `isPreserveFileTimestamps = false`
+**作用**: 禁用 ZIP/JAR 中的文件时间戳，所有文件时间戳设为固定值
+
+**为什么重要**:
+```bash
+# 没有此配置（每次构建哈希不同）
+$ sha256sum build/libs/api-1.0.0.jar
+a1b2c3d4... api-1.0.0.jar  # 第一次构建
+
+$ sha256sum build/libs/api-1.0.0.jar
+e5f6g7h8... api-1.0.0.jar  # 第二次构建（内容相同但哈希不同！）
+
+# 有此配置（可重现构建）
+$ sha256sum build/libs/api-1.0.0.jar
+a1b2c3d4... api-1.0.0.jar  # 每次构建的哈希都相同
+```
+
+#### `isReproducibleFileOrder = true`
+**作用**: 按字典序排序 ZIP/JAR 中的文件条目，避免文件系统遍历顺序的随机性
+
+**收益**:
+- ✅ 构建缓存更有效（字节级相同）
+- ✅ 安全性更好（可验证构建完整性）
+- ✅ 支持分布式缓存（Gradle Build Cache、Develocity）
+
+---
+
+### 13.6 Java 工具链配置（第 35-42 行）
+
+```kotlin
+java {
+  toolchain {
+    languageVersion.set(JavaLanguageVersion.of(21))
+  }
+  withJavadocJar()
+  withSourcesJar()
+}
+```
+
+#### Java 工具链
+
+**关键概念**: 工具链 vs 目标版本
+```
+┌─────────────────────────────────────────┐
+│ Java 21 工具链 (编译器)                  │
+│   ↓ 编译                                 │
+│ Java 8 字节码 (release = 8)             │
+│   ↓ 运行                                 │
+│ Java 8+ 运行时环境                      │
+└─────────────────────────────────────────┘
+```
+
+**优势**:
+- ✅ 使用现代编译器（更快、更好的优化）
+- ✅ 向后兼容旧版本 Java（Java 8+）
+- ✅ 避免 bootclasspath 配置的复杂性
+
+#### 附加 JAR 生成
+
+```kotlin
+withJavadocJar()   // 生成 *-javadoc.jar
+withSourcesJar()   // 生成 *-sources.jar
+```
+
+**生成的文件**:
+```
+build/libs/
+├── opentelemetry-api-1.35.0.jar         # 主 JAR
+├── opentelemetry-api-1.35.0-javadoc.jar # API 文档
+└── opentelemetry-api-1.35.0-sources.jar # 源码
+```
+
+---
+
+### 13.7 Checkstyle 配置（第 44-49 行）
+
+```kotlin
+checkstyle {
+  configDirectory.set(file("$rootDir/buildscripts/"))
+  toolVersion = "13.0.0"
+  isIgnoreFailures = false
+  configProperties["rootDir"] = rootDir
+}
+```
+
+| 配置项 | 值 | 说明 |
+|--------|-----|------|
+| `configDirectory` | `buildscripts/` | 配置文件目录 |
+| `toolVersion` | `13.0.0` | Checkstyle 版本 |
+| `isIgnoreFailures` | `false` | 风格违规**立即失败**构建 |
+| `configProperties["rootDir"]` | 项目根目录 | 传递给 checkstyle.xml 使用 |
+
+**报告位置**: `build/reports/checkstyle/main.html`
+
+---
+
+### 13.8 OWASP 依赖安全检查（第 51-71 行）
+
+```kotlin
+dependencyCheck {
+  skipConfigurations = mutableListOf(
+    "errorprone", "checkstyle", "annotationProcessor",
+    "java9AnnotationProcessor", "moduleAnnotationProcessor",
+    "testAnnotationProcessor", "testJpmsAnnotationProcessor",
+    "animalsniffer", "spotless996155815", "js2p",
+    "jmhAnnotationProcessor", "jmhBasedTestAnnotationProcessor",
+    "jmhCompileClasspath", "jmhRuntimeClasspath", "jmhRuntimeOnly"
+  )
+  failBuildOnCVSS = 7.0f
+  analyzers.assemblyEnabled = false
+  nvd.apiKey = System.getenv("NVD_API_KEY")
+}
+```
+
+#### 跳过的配置
+
+| 配置类型 | 示例 | 跳过原因 |
+|---------|------|----------|
+| 构建工具依赖 | `errorprone`, `checkstyle` | 仅编译时使用，不打包到产物 |
+| 注解处理器 | `annotationProcessor` | 仅编译时处理注解 |
+| 测试依赖 | `jmh*` | 不影响生产代码 |
+
+**性能优化**: 减少 50%+ 的扫描时间
+
+#### CVSS 阈值
+
+```kotlin
+failBuildOnCVSS = 7.0f  // fail on high or critical CVE
+```
+
+**CVSS 评分体系**:
+```
+0.0 - 3.9  ➜ Low      (低危)      ✓ 构建继续
+4.0 - 6.9  ➜ Medium   (中危)      ✓ 构建继续
+7.0 - 8.9  ➜ High     (高危)      ✗ 构建失败 ⚠️
+9.0 - 10.0 ➜ Critical (严重)      ✗ 构建失败 ⚠️
+```
+
+#### NVD API 密钥
+
+```kotlin
+nvd.apiKey = System.getenv("NVD_API_KEY")
+```
+
+**获取密钥**: [https://nvd.nist.gov/developers/request-an-api-key](https://nvd.nist.gov/developers/request-an-api-key)
+
+**配置方式**:
+```bash
+# 环境变量
+export NVD_API_KEY=your-api-key-here
+
+# CI 环境变量（推荐）
+# GitHub Actions: Settings → Secrets → NVD_API_KEY
+```
+
+---
+
+### 13.9 测试 Java 版本配置（第 73 行）
+
+```kotlin
+val testJavaVersion = gradle.startParameter.projectProperties.get("testJavaVersion")?.let(JavaVersion::toVersion)
+```
+
+从 Gradle 启动参数读取 `testJavaVersion` 属性，用于动态测试版本切换。
+
+**使用示例**:
+```bash
+# 使用 Java 17 运行测试
+./gradlew test -PtestJavaVersion=17
+
+# 使用 Java 21 运行测试
+./gradlew test -PtestJavaVersion=21
+```
+
+---
+
+### 13.10 Java 编译配置（第 75-107 行）
+
+```kotlin
+tasks {
+  withType<JavaCompile>().configureEach {
+    with(options) {
+      release.set(otelJava.minJavaVersionSupported.map { it.majorVersion.toInt() })
+
+      if (name != "jmhCompileGeneratedClasses") {
+        compilerArgs.addAll(
+          listOf(
+            "-Xlint:all",
+            "-Xlint:-try",
+            "-Xlint:-processing",
+            "-Xlint:-options",
+            "-Xlint:-serial",
+            "-Xlint:-this-escape",
+            "-Werror",
+          ),
+        )
+      }
+
+      encoding = "UTF-8"
+
+      if (name.contains("Test")) {
+        compilerArgs.add("-Xlint:-serial")
+      }
+    }
+  }
+}
+```
+
+#### Release 参数
+
+```kotlin
+release.set(otelJava.minJavaVersionSupported.map { it.majorVersion.toInt() })
+```
+
+**默认值**: `8`（Java 8）
+
+**为什么使用 `release` 而非 `sourceCompatibility`**:
+```kotlin
+// ❌ 不推荐（可能使用 Java 21 API）
+sourceCompatibility = "8"
+targetCompatibility = "8"
+
+// ✅ 推荐（严格限制只能使用 Java 8 API）
+release = 8
+```
+
+#### 编译器警告配置
+
+| 警告类型 | 含义 | 为何禁用 |
+|---------|------|----------|
+| `try` | try-with-resources 未引用资源 | 允许 `try (resource) {}` 用于确保关闭 |
+| `processing` | 注解处理器相关 | Bazel 项目建议（避免误报）|
+| `options` | 编译选项不兼容 | 现代 JDK 编译旧版本目标时触发 |
+| `serial` | 缺少 serialVersionUID | 大多数类不需要序列化 |
+| `this-escape` | 构造函数中 this 逃逸 | Java 21 新增，过于严格 |
+
+**`-Werror`**: 将所有警告视为错误，确保代码质量
+
+---
+
+### 13.11 测试配置（第 109-129 行）
+
+```kotlin
+withType<Test>().configureEach {
+  useJUnitPlatform()
+
+  val defaultMaxRetries = if (System.getenv().containsKey("CI")) 2 else 0
+  val maxTestRetries = gradle.startParameter.projectProperties["maxTestRetries"]?.toInt() ?: defaultMaxRetries
+
+  develocity.testRetry {
+    maxRetries.set(maxTestRetries);
+  }
+
+  testLogging {
+    exceptionFormat = TestExceptionFormat.FULL
+    showExceptions = true
+    showCauses = true
+    showStackTraces = true
+    showStandardStreams = true
+  }
+  maxHeapSize = "1500m"
+}
+```
+
+#### JUnit Platform
+
+```kotlin
+useJUnitPlatform()
+```
+
+启用 JUnit 5（Jupiter）测试引擎，支持 `@Test`、`@ParameterizedTest`、`@RepeatedTest` 等。
+
+#### 测试重试机制
+
+```kotlin
+val defaultMaxRetries = if (System.getenv().containsKey("CI")) 2 else 0
+```
+
+**逻辑**:
+- CI 环境：自动重试 2 次（处理不稳定的测试）
+- 本地开发：不重试（快速失败）
+
+**使用示例**:
+```bash
+# CI 环境（自动）
+./gradlew test  # 自动重试 2 次
+
+# 本地强制重试
+./gradlew test -PmaxTestRetries=3
+
+# 禁用重试（即使在 CI）
+./gradlew test -PmaxTestRetries=0
+```
+
+#### 测试日志配置
+
+| 配置项 | 值 | 效果 |
+|--------|-----|------|
+| `exceptionFormat` | `FULL` | 显示完整异常信息（包括抑制的异常） |
+| `showExceptions` | `true` | 显示异常消息 |
+| `showCauses` | `true` | 显示异常链（Caused by）|
+| `showStackTraces` | `true` | 显示完整堆栈跟踪 |
+| `showStandardStreams` | `true` | 显示 `System.out` 和 `System.err` |
+
+#### 测试内存配置
+
+```kotlin
+maxHeapSize = "1500m"
+```
+
+每个测试 JVM 最大堆内存：1.5 GB，防止测试 OOM。
+
+---
+
+### 13.12 Javadoc 配置（第 131-167 行）
+
+```kotlin
+withType<Javadoc>().configureEach {
+  exclude("io/opentelemetry/**/internal/**")
+
+  with(options as StandardJavadocDocletOptions) {
+    source = "8"
+    encoding = "UTF-8"
+    docEncoding = "UTF-8"
+    breakIterator(true)
+    addBooleanOption("html5", true)
+    addBooleanOption("Xdoclint:all,-missing", true)
+  }
+}
+
+afterEvaluate {
+  withType<Javadoc>().configureEach {
+    with(options as StandardJavadocDocletOptions) {
+      val title = "${project.description}"
+      docTitle = title
+      windowTitle = title
+    }
+  }
+}
+```
+
+#### 排除内部包
+
+```kotlin
+exclude("io/opentelemetry/**/internal/**")
+```
+
+排除所有 `internal` 包及其子包（`**` 匹配任意级别的目录）。
+
+**匹配示例**:
+```
+✓ 排除: io/opentelemetry/api/internal/Utils.java
+✓ 排除: io/opentelemetry/sdk/internal/metrics/Helper.java
+✗ 保留: io/opentelemetry/api/trace/Span.java
+```
+
+#### 标准 Javadoc 选项
+
+| 选项 | 值 | 说明 |
+|------|-----|------|
+| `source` | `8` | Java 8 语法（即使用 Java 21 编译）|
+| `encoding` | `UTF-8` | 读取源文件的编码 |
+| `docEncoding` | `UTF-8` | 生成 HTML 的编码 |
+| `breakIterator` | `true` | 使用 `java.text.BreakIterator` 检测句子边界 |
+| `html5` | `true` | 生成 HTML5（而非 HTML4）|
+| `Xdoclint:all,-missing` | `true` | 检查所有文档问题，但忽略缺失的文档 |
+
+**为什么忽略 `missing`**: 不是所有方法都需要文档（如简单的 getter），避免过于严格的要求。
+
+---
+
+### 13.13 JAR 清单配置（第 145-157 行）
+
+```kotlin
+withType<Jar>().configureEach {
+  inputs.property("moduleName", otelJava.moduleName)
+
+  manifest {
+    attributes(
+      "Automatic-Module-Name" to otelJava.moduleName,
+      "Built-By" to System.getProperty("user.name"),
+      "Built-JDK" to System.getProperty("java.version"),
+      "Implementation-Title" to project.name,
+      "Implementation-Version" to project.version,
+    )
+  }
+}
+```
+
+#### 生成的 MANIFEST.MF 示例
+
+```manifest
+Manifest-Version: 1.0
+Automatic-Module-Name: io.opentelemetry.api
+Built-By: jdoe
+Built-JDK: 21.0.1
+Implementation-Title: opentelemetry-api
+Implementation-Version: 1.35.0
+```
+
+#### Automatic-Module-Name 详解
+
+**作用**:
+- 指定未模块化的 JAR 在 Java 9+ 模块系统中的模块名
+- 避免自动生成的名称（基于 JAR 文件名，可能不稳定）
+
+**示例**:
+```java
+// 模块声明中引用
+module my.app {
+    requires io.opentelemetry.api;  // 使用 Automatic-Module-Name
+}
+```
+
+**最佳实践**:
+- 使用反向域名（如 `io.opentelemetry.api`）
+- 与包名一致
+- 为未来的模块化做准备
+
+---
+
+### 13.14 多 Java 版本测试（第 170-181 行）
+
+```kotlin
+afterEvaluate {
+  tasks.withType<Test>().configureEach {
+    if (testJavaVersion != null) {
+      javaLauncher.set(
+        javaToolchains.launcherFor {
+          languageVersion.set(JavaLanguageVersion.of(testJavaVersion.majorVersion))
+        }
+      )
+      isEnabled = isEnabled && testJavaVersion >= otelJava.minJavaVersionSupported.get()
+    }
+  }
+}
+```
+
+#### 动态 Java 版本切换
+
+如果指定了 `-PtestJavaVersion=17`，使用 Java 17 运行测试。Gradle 自动下载或发现指定版本的 JDK。
+
+**工作流程**:
+```
+1. 用 Java 21 编译 ➜ class 文件（target = 8）
+2. 用 Java 17 运行测试 ➜ 验证 Java 17 兼容性
+```
+
+#### 最低版本检查
+
+```kotlin
+isEnabled = isEnabled && testJavaVersion >= otelJava.minJavaVersionSupported.get()
+```
+
+如果 `testJavaVersion < minJavaVersionSupported`，禁用测试任务（跳过）。
+
+#### CI 矩阵测试示例
+
+**GitHub Actions**:
+```yaml
+strategy:
+  matrix:
+    java: [8, 11, 17, 21]
+
+steps:
+  - name: Test with Java ${{ matrix.java }}
+    run: ./gradlew test -PtestJavaVersion=${{ matrix.java }}
+```
+
+---
+
+### 13.15 版本资源生成（第 184-205 行）
+
+```kotlin
+plugins.withId("otel.publish-conventions") {
+  tasks {
+    register("generateVersionResource") {
+      val moduleName = otelJava.moduleName
+      val propertiesDir = moduleName.map {
+        File(layout.buildDirectory.asFile.get(),
+             "generated/properties/${it.replace('.', '/')}")
+      }
+      val versionProperty = project.version.toString()
+
+      inputs.property("project.version", versionProperty)
+      outputs.dir(propertiesDir)
+
+      doLast {
+        File(propertiesDir.get(), "version.properties").writeText("sdk.version=${versionProperty}")
+      }
+    }
+  }
+
+  sourceSets {
+    main {
+      output.dir("${layout.buildDirectory.asFile.get()}/generated/properties",
+                 "builtBy" to "generateVersionResource")
+    }
+  }
+}
+```
+
+#### 条件触发
+
+```kotlin
+plugins.withId("otel.publish-conventions") {
+    // 仅当应用了 otel.publish-conventions 插件时执行
+}
+```
+
+**原因**: 只有发布的模块需要版本资源文件。
+
+#### 生成路径计算
+
+```
+moduleName = "io.opentelemetry.api"
+↓
+propertiesDir = build/generated/properties/io/opentelemetry/api/
+```
+
+#### 生成的文件
+
+**路径**: `build/generated/properties/io/opentelemetry/api/version.properties`
+```properties
+sdk.version=1.35.0
+```
+
+#### 使用示例
+
+**Java 代码中读取版本**:
+```java
+import java.io.InputStream;
+import java.util.Properties;
+
+public class VersionUtils {
+    public static String getSdkVersion() {
+        try (InputStream in = VersionUtils.class
+                .getResourceAsStream("/io/opentelemetry/api/version.properties")) {
+            Properties props = new Properties();
+            props.load(in);
+            return props.getProperty("sdk.version");
+        } catch (Exception e) {
+            return "unknown";
+        }
+    }
+}
+```
+
+---
+
+### 13.16 依赖管理配置（第 207-251 行）
+
+#### 依赖冲突策略
+
+```kotlin
+configurations.configureEach {
+  resolutionStrategy {
+    failOnVersionConflict()
+    preferProjectModules()
+  }
+}
+```
+
+**`failOnVersionConflict()`**:
+- 依赖版本冲突时**立即失败**构建
+- 强制显式解决冲突（而非静默选择版本）
+
+**示例**:
+```
+项目依赖:
+  ├─ guava:30.0
+  └─ dep-A
+       └─ guava:29.0  ❌ 冲突！
+
+构建失败: "Conflict found for guava"
+```
+
+**`preferProjectModules()`**:
+- 优先使用项目模块（而非外部依赖）
+- 用于复合构建（composite builds）
+
+#### 依赖管理平台
+
+```kotlin
+val dependencyManagement by configurations.creating {
+  isCanBeConsumed = false
+  isCanBeResolved = false
+}
+
+dependencies {
+  dependencyManagement(platform(project(":dependencyManagement")))
+
+  afterEvaluate {
+    configurations.configureEach {
+      if (isCanBeResolved && !isCanBeConsumed) {
+        extendsFrom(dependencyManagement)
+      }
+    }
+  }
+}
+```
+
+##### Gradle Configuration 的两个核心属性
+
+在理解上述代码前，需要了解 Gradle Configuration 的两个关键属性：
+
+**1. `isCanBeResolved` - 能否解析依赖**
+
+**含义**：
+- `true`：可以解析依赖（下载 JAR 文件，实际使用）
+- `false`：不能解析依赖（仅用于声明，不实际使用）
+
+**示例**：
+```kotlin
+// ❌ 不可解析配置
+val api by configurations.creating {
+    isCanBeResolved = false
+}
+dependencies {
+    api("com.google.guava:guava:32.1.3-jre")
+}
+api.files  // 抛出异常：Configuration 'api' is not resolvable
+
+// ✅ 可解析配置
+val compileClasspath by configurations.creating {
+    isCanBeResolved = true
+    extendsFrom(api)
+}
+compileClasspath.files  // 返回 [guava-32.1.3-jre.jar, ...]
+```
+
+**2. `isCanBeConsumed` - 能否被其他项目消费**
+
+**含义**：
+- `true`：其他项目可以依赖这个配置
+- `false`：仅供内部使用，不对外发布
+
+**示例**：
+```kotlin
+// ❌ 不可消费配置（内部使用）
+val compileClasspath by configurations.creating {
+    isCanBeConsumed = false  // 其他项目无法依赖
+}
+
+// ✅ 可消费配置（发布给其他项目）
+val apiElements by configurations.creating {
+    isCanBeConsumed = true  // 其他项目可以依赖
+}
+```
+
+**四种配置组合模式**：
+
+| 类型 | `isCanBeResolved` | `isCanBeConsumed` | 作用 | 示例 |
+|------|-------------------|-------------------|------|------|
+| **声明型** | `false` | `false` | 仅声明依赖 | `api`, `implementation` |
+| **可解析** | `true` | `false` | 实际使用依赖 | `compileClasspath`, `runtimeClasspath` |
+| **可消费** | `false` | `true` | 发布给其他项目 | `apiElements`, `runtimeElements` |
+| **遗留型** | `true` | `true` | 不推荐（角色混淆）| `compile`（已废弃）|
+
+**`dependencyManagement` 配置为什么这样设置**：
+
+```kotlin
+val dependencyManagement by configurations.creating {
+    isCanBeResolved = false  // 只存储版本信息，不实际下载 JAR
+    isCanBeConsumed = false  // 仅供项目内部使用，不对外发布
+}
+```
+
+**原因**：
+- `dependencyManagement` 是一个"版本目录"，不需要实际下载依赖
+- 它仅用于版本管理，其他配置继承它的版本信息后再解析
+- 它是项目内部机制，不需要对外发布
+
+##### 实际打包和依赖传递示例
+
+**场景 1: 单模块项目的完整配置链**
+
+```kotlin
+// 完整示例：从声明到打包
+plugins {
+    `java-library`
+}
+
+// 1. 声明型配置（仅记录依赖）
+val api by configurations.creating {
+    isCanBeResolved = false  // 不能 .files
+    isCanBeConsumed = false  // 不对外发布
+}
+
+// 2. 可解析配置（实际使用）
+val compileClasspath by configurations.creating {
+    isCanBeResolved = true   // 可以 .files，下载 JAR
+    isCanBeConsumed = false
+    extendsFrom(api)
+}
+
+// 3. 可消费配置（对外发布）
+val apiElements by configurations.creating {
+    isCanBeResolved = false
+    isCanBeConsumed = true   // 其他项目可以依赖
+    extendsFrom(api)
+}
+
+dependencies {
+    api("com.google.guava:guava:32.1.3-jre")
+}
+
+// 验证任务
+tasks.register("showClasspath") {
+    doLast {
+        // api.files  // ❌ 抛出异常：Configuration 'api' is not resolvable
+
+        println("compileClasspath 文件:")
+        compileClasspath.files.forEach {
+            println("  - ${it.name}")
+        }
+        // 输出: guava-32.1.3-jre.jar, failureaccess-1.0.1.jar, ...
+    }
+}
+
+// Fat JAR 打包（包含所有依赖）
+tasks.jar {
+    from(compileClasspath.map {
+        if (it.isDirectory) it else zipTree(it)
+    })
+}
+```
+
+**场景 2: 多模块项目的依赖传递**
+
+```kotlin
+// 项目结构:
+// ├── module-a (库)
+// └── module-b (依赖 module-a)
+
+// ========== module-a/build.gradle.kts ==========
+plugins {
+    `java-library`
+    `maven-publish`
+}
+
+val apiElements by configurations.getting {
+    // java-library 插件已创建此配置
+    // isCanBeResolved = false
+    // isCanBeConsumed = true
+}
+
+dependencies {
+    api("com.google.guava:guava:32.1.3-jre")      // API 依赖（传递）
+    implementation("org.slf4j:slf4j-api:2.0.9")   // 实现依赖（不传递）
+}
+
+// ========== module-b/build.gradle.kts ==========
+dependencies {
+    implementation(project(":module-a"))
+}
+
+tasks.register("showDependencies") {
+    doLast {
+        println("module-b 的编译类路径:")
+        configurations.compileClasspath.get().files.forEach {
+            println("  ${it.name}")
+        }
+        // 输出:
+        // module-a.jar
+        // guava-32.1.3-jre.jar  ← 传递依赖（来自 module-a 的 api）
+        // （不包含 slf4j-api，因为是 implementation）
+    }
+}
+```
+
+**场景 3: Variant 属性匹配机制**
+
+```kotlin
+// module-a: 发布多个 Variant
+val apiElements by configurations.creating {
+    isCanBeConsumed = true
+    attributes {
+        attribute(Usage.USAGE_ATTRIBUTE, objects.named(Usage.JAVA_API))
+        attribute(Category.CATEGORY_ATTRIBUTE, objects.named(Category.LIBRARY))
+        attribute(LibraryElements.LIBRARY_ELEMENTS_ATTRIBUTE,
+                  objects.named(LibraryElements.JAR))
+    }
+}
+
+val runtimeElements by configurations.creating {
+    isCanBeConsumed = true
+    attributes {
+        attribute(Usage.USAGE_ATTRIBUTE, objects.named(Usage.JAVA_RUNTIME))
+        attribute(Category.CATEGORY_ATTRIBUTE, objects.named(Category.LIBRARY))
+        attribute(LibraryElements.LIBRARY_ELEMENTS_ATTRIBUTE,
+                  objects.named(LibraryElements.JAR))
+    }
+}
+
+// module-b: Gradle 自动选择匹配的 Variant
+dependencies {
+    implementation(project(":module-a"))
+    // 编译时 → 解析 apiElements（Usage.JAVA_API）
+    // 运行时 → 解析 runtimeElements（Usage.JAVA_RUNTIME）
+}
+```
+
+##### 调试命令和诊断方法
+
+**查看项目配置**:
+```bash
+# 列出所有配置
+./gradlew :api:configurations
+
+# 查看特定配置的依赖树
+./gradlew :api:dependencies --configuration compileClasspath
+
+# 查看可消费的配置（outgoing variants）
+./gradlew :api:outgoingVariants
+
+# 查看可解析的配置
+./gradlew :api:resolvableConfigurations
+
+# 查看配置详细信息
+./gradlew :api:dependencyInsight --dependency guava --configuration compileClasspath
+```
+
+**在代码中检查配置属性**:
+```kotlin
+tasks.register("inspectConfigurations") {
+    doLast {
+        configurations.forEach { config ->
+            println("Configuration: ${config.name}")
+            println("  isCanBeResolved: ${config.isCanBeResolved}")
+            println("  isCanBeConsumed: ${config.isCanBeConsumed}")
+            if (config.isCanBeResolved) {
+                println("  files count: ${config.files.size}")
+            }
+            println()
+        }
+    }
+}
+
+// 输出示例:
+// Configuration: api
+//   isCanBeResolved: false
+//   isCanBeConsumed: false
+//
+// Configuration: compileClasspath
+//   isCanBeResolved: true
+//   isCanBeConsumed: false
+//   files count: 15
+//
+// Configuration: apiElements
+//   isCanBeResolved: false
+//   isCanBeConsumed: true
+```
+
+##### 常见问题和解决方案
+
+**问题 1: Configuration 'xxx' is not resolvable**
+
+```kotlin
+// ❌ 错误代码
+val api by configurations.creating {
+    isCanBeResolved = false
+}
+dependencies {
+    api("com.google.guava:guava:32.1.3-jre")
+}
+api.files  // 抛出异常：Resolving dependency configuration 'api' is not allowed
+
+// ✅ 解决方案
+val compileClasspath by configurations.creating {
+    isCanBeResolved = true
+    extendsFrom(api)  // 继承 api 的依赖
+}
+compileClasspath.files  // 正常工作，返回 guava JAR
+```
+
+**问题 2: 其他模块看不到我的依赖**
+
+```kotlin
+// ❌ 错误配置（module-a）
+val api by configurations.creating {
+    isCanBeConsumed = false  // 不对外发布
+}
+dependencies {
+    api("com.google.guava:guava:32.1.3-jre")
+}
+
+// module-b 无法获取 guava 依赖
+
+// ✅ 解决方案：创建可消费的配置
+val apiElements by configurations.creating {
+    isCanBeConsumed = true   // 其他项目可以消费
+    extendsFrom(api)
+    attributes {
+        attribute(Usage.USAGE_ATTRIBUTE, objects.named(Usage.JAVA_API))
+    }
+}
+```
+
+**问题 3: 依赖传递不生效**
+
+```kotlin
+// ❌ module-a: 使用 implementation（不传递）
+dependencies {
+    implementation("com.google.guava:guava:32.1.3-jre")
+}
+
+// module-b: 无法看到 guava
+dependencies {
+    implementation(project(":module-a"))
+    // compileClasspath 中没有 guava
+}
+
+// ✅ 解决方案：module-a 使用 api（传递）
+dependencies {
+    api("com.google.guava:guava:32.1.3-jre")
+}
+
+// 现在 module-b 可以看到 guava
+```
+
+**问题 4: Fat JAR 构建失败**
+
+```kotlin
+// ❌ 错误：使用不可解析的配置
+tasks.jar {
+    from(api.files)  // 抛出异常
+}
+
+// ✅ 解决方案：使用可解析的配置
+tasks.jar {
+    from(configurations.compileClasspath.get().map {
+        if (it.isDirectory) it else zipTree(it)
+    })
+}
+```
+
+##### 依赖解析流程详解
+
+```
+1. module-b 声明依赖 project(":module-a")
+   ↓
+2. Gradle 查找 module-a 的可消费配置
+   - 筛选条件: isCanBeConsumed = true
+   ↓
+3. 找到多个可消费配置（apiElements, runtimeElements）
+   ↓
+4. 根据 Variant Attributes 选择匹配的配置
+   - 编译时: 选择 Usage.JAVA_API → apiElements
+   - 运行时: 选择 Usage.JAVA_RUNTIME → runtimeElements
+   ↓
+5. 解析选中配置的依赖
+   - extendsFrom 链: apiElements → api → dependencies
+   ↓
+6. 将依赖添加到 module-b 的 compileClasspath/runtimeClasspath
+   - api 依赖传递，implementation 不传递
+   ↓
+7. 递归解析传递依赖
+```
+
+##### Configuration 属性快速参考
+
+| 场景 | isCanBeResolved | isCanBeConsumed | 典型用途 |
+|------|----------------|-----------------|----------|
+| 声明依赖 | `false` | `false` | `api`, `implementation` - 记录依赖 |
+| 编译/运行 | `true` | `false` | `compileClasspath` - 实际使用 JAR |
+| 发布 API | `false` | `true` | `apiElements` - 供其他项目消费 |
+| 版本管理 | `false` | `false` | `dependencyManagement` - 仅存储版本 |
+
+##### 依赖管理工作流程
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ :dependencyManagement 项目                              │
+│ constraints { guava:32.1.3-jre, mockito:5.8.0 }        │
+└─────────────────────┬───────────────────────────────────┘
+                      │ platform(...)
+                      ↓
+┌─────────────────────────────────────────────────────────┐
+│ dependencyManagement 配置（版本目录）                    │
+│ - isCanBeResolved: false (不下载 JAR)                  │
+│ - isCanBeConsumed: false (不对外发布)                  │
+└─────────────────────┬───────────────────────────────────┘
+                      │ extendsFrom(...)
+                      ↓
+┌──────────────────────────────────────────────────────────┐
+│ compileClasspath 配置（实际使用）                        │
+│ - isCanBeResolved: true (下载 JAR)                     │
+│ - isCanBeConsumed: false                                │
+│ - 继承版本 → 解析依赖 → 下载 JAR                        │
+└──────────────────────────────────────────────────────────┘
+                      │
+                      ↓
+┌──────────────────────────────────────────────────────────┐
+│ 子项目依赖声明（无需版本）                               │
+│ dependencies { implementation("guava") }                 │
+│ 自动使用 32.1.3-jre                                     │
+└──────────────────────────────────────────────────────────┘
+```
+
+**效果**:
+```kotlin
+// 子项目不需要指定版本
+dependencies {
+    implementation("com.google.guava:guava")  // 自动使用管理的版本
+}
+```
+
+#### Mockito Agent 配置
+
+```kotlin
+val mockitoAgent by configurations.creating {
+  extendsFrom(dependencyManagement)
+}
+
+dependencies {
+  mockitoAgent("org.mockito:mockito-core")
+}
+```
+
+**用途**: 用于测试套件配置中的 Mockito Agent 预加载（解决 Java 21+ 动态代理加载警告）。
+
+#### 通用依赖
+
+```kotlin
+dependencies {
+  compileOnly("com.google.auto.value:auto-value-annotations")
+  compileOnly("com.google.code.findbugs:jsr305")
+  annotationProcessor("com.google.guava:guava-beta-checker")
+  compileOnly("javax.annotation:javax.annotation-api")
+
+  modules {
+    module("com.google.collections:google-collections") {
+      replacedBy("com.google.guava:guava", "google-collections is now part of Guava")
+    }
+  }
+}
+```
+
+| 依赖 | 配置 | 用途 |
+|------|------|------|
+| `auto-value-annotations` | `compileOnly` | AutoValue 注解（编译时） |
+| `jsr305` | `compileOnly` | `@Nullable`、`@NonNull` 注解 |
+| `guava-beta-checker` | `annotationProcessor` | 检查 Guava Beta API 使用 |
+| `javax.annotation-api` | `compileOnly` | `@Generated` 注解（gRPC 兼容）|
+
+**模块替换**: 自动将旧依赖 `google-collections` 替换为 `guava`，解决 Java 9+ 模块冲突。
+
+---
+
+### 13.17 测试套件配置（第 253-298 行）
+
+```kotlin
+testing {
+  suites.withType(JvmTestSuite::class).configureEach {
+    useJUnitJupiter()
+
+    dependencies {
+      implementation(project(project.path))
+      implementation(project(":testing-internal"))
+
+      compileOnly("com.google.auto.value:auto-value-annotations")
+      compileOnly("com.google.errorprone:error_prone_annotations")
+      compileOnly("com.google.code.findbugs:jsr305")
+
+      implementation("nl.jqno.equalsverifier:equalsverifier")
+      implementation("org.mockito:mockito-core")
+      implementation("org.mockito:mockito-junit-jupiter")
+      implementation("org.assertj:assertj-core")
+      implementation("org.awaitility:awaitility")
+      implementation("org.junit-pioneer:junit-pioneer")
+      implementation("io.github.netmikey.logunit:logunit-jul")
+
+      runtimeOnly("org.slf4j:slf4j-simple")
+    }
+
+    targets {
+      all {
+        testTask.configure {
+          systemProperty("java.util.logging.config.class",
+                         "io.opentelemetry.internal.testing.slf4j.JulBridgeInitializer")
+
+          val mockitoAgent: FileCollection = mockitoAgent
+          doFirst {
+            val mockitoAgentJar = mockitoAgent.files.single {
+              it.name.contains("byte-buddy-agent")
+            }
+            jvmArgs("-javaagent:${mockitoAgentJar}")
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+#### JUnit Jupiter 配置
+
+```kotlin
+useJUnitJupiter()
+```
+
+所有测试套件使用 JUnit 5。
+
+#### 测试工具库
+
+| 库 | 用途 |
+|-----|------|
+| `equalsverifier` | 自动验证 `equals()` 和 `hashCode()` 实现 |
+| `mockito-core` | Mock 框架 |
+| `mockito-junit-jupiter` | Mockito + JUnit 5 集成 |
+| `assertj-core` | 流式断言库 |
+| `awaitility` | 异步测试工具 |
+| `junit-pioneer` | JUnit 5 扩展 |
+| `logunit-jul` | 日志断言工具 |
+| `slf4j-simple` | 简单日志实现 |
+
+#### 使用示例
+
+```java
+// equalsverifier
+@Test
+void testEquals() {
+    EqualsVerifier.forClass(MyClass.class).verify();
+}
+
+// assertj
+@Test
+void testAssertJ() {
+    assertThat(list)
+        .hasSize(3)
+        .contains("foo", "bar");
+}
+
+// awaitility
+@Test
+void testAsync() {
+    await().atMost(5, SECONDS)
+           .until(() -> service.isReady());
+}
+```
+
+#### JUL 桥接配置
+
+```kotlin
+systemProperty("java.util.logging.config.class",
+               "io.opentelemetry.internal.testing.slf4j.JulBridgeInitializer")
+```
+
+**作用**: 将 `java.util.logging`（JUL）日志桥接到 SLF4J，统一测试日志输出。
+
+**工作流程**:
+```
+JUL 日志 ➜ JulBridgeInitializer ➜ SLF4J ➜ slf4j-simple ➜ 控制台
+```
+
+#### Mockito Agent 预加载
+
+```kotlin
+val mockitoAgent: FileCollection = mockitoAgent
+doFirst {
+  val mockitoAgentJar = mockitoAgent.files.single {
+    it.name.contains("byte-buddy-agent")
+  }
+  jvmArgs("-javaagent:${mockitoAgentJar}")
+}
+```
+
+**问题背景**: Java 21+ 引入了动态代理加载警告：
+```
+WARNING: A Java agent has been loaded dynamically
+WARNING: Dynamic loading of agents will be disallowed by default in a future release
+```
+
+**原因**:
+- Mockito 使用 Byte Buddy 动态生成 Mock 类
+- Byte Buddy 需要附加 Java Agent（`byte-buddy-agent.jar`）
+- Java 21+ 不允许运行时动态附加 Agent（会触发警告）
+
+**解决方案**:
+- 通过 `-javaagent` JVM 参数**预先加载** Agent
+- 从 `mockitoAgent` 配置中提取 `byte-buddy-agent-*.jar`
+- 在测试 JVM 启动时附加
+
+**效果**:
+```bash
+# 没有预加载（产生警告）
+java -cp ... org.junit.runner.JUnit5 MyTest
+WARNING: A Java agent has been loaded dynamically...
+
+# 有预加载（无警告）
+java -javaagent:byte-buddy-agent-1.14.9.jar -cp ... org.junit.runner.JUnit5 MyTest
+✓ 测试运行，无警告
+```
+
+**最佳实践**:
+- ✅ Java 21+: **必须**预加载 Agent
+- ✅ Java 17: 可选（有警告但不影响功能）
+- ✅ Java 8-11: 不需要（无警告）
+
+---
+
+### 13.18 总结
+
+#### 核心特性
+
+| 特性 | 实现位置 | 关键价值 |
+|------|----------|----------|
+| **向后兼容** | 第 78 行（release 参数）| Java 21 编译，Java 8+ 运行 |
+| **可重现构建** | 第 30-33 行 | 字节级相同的构建产物 |
+| **安全扫描** | 第 51-71 行 | CVSS 7.0+ 漏洞自动拦截 |
+| **测试重试** | 第 112-118 行 | CI 环境自动重试不稳定测试 |
+| **多版本测试** | 第 170-181 行 | 一次提交测试多个 Java 版本 |
+| **严格质量门禁** | 第 80-98 行 | -Werror 将警告视为错误 |
+| **统一依赖版本** | 第 214-231 行 | BOM 平台管理 |
+| **Mockito Agent 优化** | 第 283-293 行 | 解决 Java 21+ 警告 |
+
+#### 配置层次结构
+
+```
+otel.java-conventions
+├── 继承的插件
+│   ├── otel.errorprone-conventions
+│   ├── otel.jacoco-conventions
+│   └── otel.spotless-conventions
+├── 配置的工具
+│   ├── Checkstyle 13.0.0
+│   └── OWASP Dependency Check
+└── 集成的功能
+    ├── Java 工具链（Java 21）
+    ├── 测试框架（JUnit 5）
+    ├── 依赖管理平台
+    └── 版本资源生成
+```
+
+这 299 行代码，为整个 OpenTelemetry Java 项目的 **50+ 模块** 提供了统一、高质量的构建基础！
+
+---
+
+## 14. 扩展阅读
+
+### 相关文档
+- [Gradle 官方文档](https://docs.gradle.org/)
+- [Kotlin DSL 指南](https://docs.gradle.org/current/userguide/kotlin_dsl.html)
+- [ErrorProne 文档](https://errorprone.info/)
+- [Spotless 插件文档](https://github.com/diffplug/spotless)
+- [JaCoCo 文档](https://www.jacoco.org/jacoco/trunk/doc/)
+- [Wire Protobuf 文档](https://square.github.io/wire/)
+- [JMH 文档](https://openjdk.org/projects/code-tools/jmh/)
+
+### OpenTelemetry 相关
+- [OpenTelemetry Java 主仓库](https://github.com/open-telemetry/opentelemetry-java)
+- [OpenTelemetry 规范](https://github.com/open-telemetry/opentelemetry-specification)
+
+---
+
+## 15. 维护者
+
+**问题反馈**: [GitHub Issues](https://github.com/open-telemetry/opentelemetry-java/issues)
+
+**贡献指南**: [CONTRIBUTING.md](../CONTRIBUTING.md)
+
+---
+
+**最后更新**: 2026-01-09
+**文档版本**: 1.3.0

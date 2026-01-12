@@ -21,6 +21,7 @@ import io.opentelemetry.sdk.autoconfigure.spi.ResourceProvider;
 import io.opentelemetry.sdk.autoconfigure.spi.internal.DefaultConfigProperties;
 import java.util.Collections;
 import java.util.List;
+import java.util.function.Function;
 import org.junit.jupiter.api.Test;
 
 public class SpiHelperTest {

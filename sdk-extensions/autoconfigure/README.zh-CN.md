@@ -915,6 +915,1019 @@ public class DynamicResourceProvider implements ResourceProvider {
 
 ---
 
+## buildImpl 方法源码解析
+
+深入解析 `AutoConfiguredOpenTelemetrySdkBuilder#buildImpl` 方法的实现逻辑，这是自动配置的核心方法。
+
+### 方法概述
+
+`buildImpl` 是自动配置的核心入口方法，位于 `AutoConfiguredOpenTelemetrySdkBuilder.java` 的第 447-512 行。它负责：
+
+- ✅ 尝试声明式配置（YAML 文件）
+- ✅ 加载和执行 SPI 扩展和定制器
+- ✅ 加载配置属性（环境变量、系统属性）
+- ✅ 配置 Resource（服务信息）
+- ✅ 构建 TracerProvider、MeterProvider、LoggerProvider
+- ✅ 组装最终的 OpenTelemetrySdk
+- ✅ 注册关闭钩子和监听器
+- ✅ 异常处理和资源清理
+
+**方法签名**:
+```java
+private AutoConfiguredOpenTelemetrySdk buildImpl()
+```
+
+**在架构中的位置**:
+```
+AutoConfiguredOpenTelemetrySdk
+└── build()
+    └── buildImpl()  ← 核心配置方法
+        ├── maybeConfigureFromFile()      # 声明式配置
+        ├── SpiHelper.create()            # SPI 加载
+        ├── getConfig()                   # 配置属性加载
+        ├── ResourceConfiguration         # Resource 配置
+        ├── configureSdk()                # SDK 组件配置
+        │   ├── MeterProvider
+        │   ├── TracerProvider
+        │   └── LoggerProvider
+        └── 异常处理和资源清理
+```
+
+### 执行流程图
+
+```
+buildImpl() 执行流程
+│
+├─┤阶段 1: 尝试声明式配置 (448-457 行)│
+│  │
+│  ├─ maybeConfigureFromFile()
+│  │   ├─ 检查 INCUBATOR_AVAILABLE
+│  │   ├─ 读取 otel.experimental.config.file
+│  │   └─ 如果成功 → 直接返回 (跳过后续步骤)
+│  │
+│  └─ 如果失败 → 继续环境变量配置
+│
+├─┤阶段 2: 初始化 SPI 和定制器 (459-467 行)│
+│  │
+│  ├─ SpiHelper.create(componentLoader)
+│  ├─ mergeSdkTracerProviderConfigurer()     # 兼容旧版 API
+│  └─ 执行 AutoConfigurationCustomizerProvider
+│      └─ customizer.customize(this)
+│
+├─┤阶段 3: 加载配置属性 (468 行)│
+│  │
+│  └─ getConfig() → computeConfigProperties()
+│      ├─ DefaultConfigProperties.create()
+│      ├─ 应用 propertiesSupplier
+│      └─ 应用 propertiesCustomizers
+│
+├─┤阶段 4: 配置 Resource (470-471 行)│
+│  │
+│  └─ ResourceConfiguration.configureResource()
+│      ├─ 加载 ResourceProvider SPI
+│      ├─ 合并所有 Resource
+│      └─ 应用 resourceCustomizer
+│
+├─┤阶段 5: 构建 SDK 组件 (473-494 行)│
+│  │
+│  ├─ 创建 closeables 列表 (资源跟踪)
+│  ├─ OpenTelemetrySdkBuilder.builder()
+│  │
+│  ├─ 5.1: 配置 Propagators
+│  │   └─ PropagatorConfiguration.configurePropagators()
+│  │
+│  ├─ 5.2: 检查 otel.sdk.disabled
+│  │   └─ if (sdkEnabled) → configureSdk()
+│  │
+│  ├─ 5.3: configureSdk() 详解见下方
+│  │   ├─ MeterProvider (先创建)
+│  │   ├─ TracerProvider (依赖 MeterProvider)
+│  │   └─ LoggerProvider (依赖 MeterProvider)
+│  │
+│  ├─ 5.4: 构建 OpenTelemetrySdk
+│  │   └─ sdkBuilder.build()
+│  │
+│  ├─ 5.5: 注册关闭钩子
+│  │   └─ maybeRegisterShutdownHook()
+│  │
+│  ├─ 5.6: 调用监听器
+│  │   └─ callAutoConfigureListeners()
+│  │
+│  └─ 5.7: 返回结果
+│      └─ AutoConfiguredOpenTelemetrySdk.create()
+│
+└─┤阶段 6: 异常处理 (495-511 行)│
+   │
+   └─ catch (RuntimeException e)
+       ├─ 清理所有 closeables
+       ├─ 记录错误日志
+       └─ 包装为 ConfigurationException
+```
+
+### 阶段 1: 声明式配置（YAML）
+
+**源码位置**: 第 448-457 行
+
+```java
+// 尝试从文件配置加载
+AutoConfiguredOpenTelemetrySdk fromFileConfiguration =
+    maybeConfigureFromFile(
+        this.config != null
+            ? this.config
+            : DefaultConfigProperties.create(Collections.emptyMap(), componentLoader),
+        componentLoader);
+
+// 如果成功则直接返回
+if (fromFileConfiguration != null) {
+    maybeRegisterShutdownHook(fromFileConfiguration.getOpenTelemetrySdk());
+    return fromFileConfiguration;
+}
+```
+
+**关键点**:
+
+1. **优先级最高**: 声明式配置优先于环境变量配置
+2. **Incubator 依赖**: 需要 `opentelemetry-sdk-extension-incubator` 模块
+3. **早期返回**: 如果成功则跳过所有后续配置步骤
+
+**maybeConfigureFromFile 逻辑** (571-595 行):
+
+```java
+@Nullable
+private static AutoConfiguredOpenTelemetrySdk maybeConfigureFromFile(
+    ConfigProperties config, ComponentLoader componentLoader) {
+
+    // 1. 检查 incubator 模块是否可用
+    if (INCUBATOR_AVAILABLE) {
+        // 2. 尝试从 SPI 配置
+        AutoConfiguredOpenTelemetrySdk sdk = IncubatingUtil.configureFromSpi(componentLoader);
+        if (sdk != null) {
+            return sdk;
+        }
+    }
+
+    // 3. 检查配置文件路径
+    String configurationFile = config.getString("otel.experimental.config.file");
+    if (configurationFile == null || configurationFile.isEmpty()) {
+        return null;  // 没有配置文件,继续环境变量配置
+    }
+
+    // 4. 加载配置文件
+    if (!INCUBATOR_AVAILABLE) {
+        throw new ConfigurationException(
+            "Cannot autoconfigure from config file without " +
+            "opentelemetry-sdk-extension-incubator on the classpath");
+    }
+
+    return IncubatingUtil.configureFromFile(logger, configurationFile, componentLoader);
+}
+```
+
+**使用场景**:
+
+```bash
+# 使用 YAML 配置文件
+export OTEL_EXPERIMENTAL_CONFIG_FILE=/path/to/config.yaml
+
+# config.yaml 内容
+exporters:
+  otlp:
+    endpoint: http://localhost:4317
+tracers:
+  sdk:
+    sampler: always_on
+```
+
+### 阶段 2: 初始化 SPI 和定制器
+
+**源码位置**: 第 459-467 行
+
+```java
+// 创建 SPI 助手
+SpiHelper spiHelper = SpiHelper.create(componentLoader);
+
+// 确保只执行一次定制器
+if (!customized) {
+    customized = true;
+
+    // 1. 兼容旧版 SdkTracerProviderConfigurer (已废弃)
+    mergeSdkTracerProviderConfigurer();
+
+    // 2. 加载并执行所有 AutoConfigurationCustomizerProvider
+    for (AutoConfigurationCustomizerProvider customizer :
+          spiHelper.loadOrdered(AutoConfigurationCustomizerProvider.class)) {
+        customizer.customize(this);
+    }
+}
+```
+
+**关键点**:
+
+1. **SpiHelper 职责**:
+   - 加载 SPI 实现（ResourceProvider、SpanExporterProvider 等）
+   - 管理组件的生命周期
+   - 提供有序加载机制（通过 `Ordered` 接口）
+
+2. **customized 标志**:
+   - 防止重复执行定制器
+   - 允许多次调用 `build()` 而不重复定制
+
+3. **AutoConfigurationCustomizerProvider**:
+   ```java
+   public interface AutoConfigurationCustomizerProvider extends Ordered {
+       void customize(AutoConfigurationCustomizer autoConfiguration);
+       int order();  // 执行顺序
+   }
+   ```
+
+**自定义 SPI 示例**:
+
+```java
+// 实现自定义定制器
+public class MyCustomizerProvider implements AutoConfigurationCustomizerProvider {
+
+    @Override
+    public void customize(AutoConfigurationCustomizer autoConfiguration) {
+        // 添加全局 Resource 属性
+        autoConfiguration.addResourceCustomizer((resource, config) ->
+            resource.toBuilder()
+                .put("deployment.environment", "production")
+                .put("service.namespace", "my-namespace")
+                .build());
+
+        // 添加 Span 过滤器
+        autoConfiguration.addSpanProcessorCustomizer((processor, config) ->
+            new FilteringSpanProcessor(processor));
+    }
+
+    @Override
+    public int order() {
+        return 100;  // 执行顺序
+    }
+}
+
+// 注册 SPI
+// 文件: META-INF/services/io.opentelemetry.sdk.autoconfigure.spi.AutoConfigurationCustomizerProvider
+// 内容: com.example.MyCustomizerProvider
+```
+
+### 阶段 3: 加载配置属性
+
+**源码位置**: 第 468 行
+
+```java
+ConfigProperties config = getConfig();
+```
+
+**getConfig 方法** (629-635 行):
+
+```java
+private ConfigProperties getConfig() {
+    ConfigProperties config = this.config;
+    if (config == null) {
+        config = computeConfigProperties();
+    }
+    return config;
+}
+```
+
+**computeConfigProperties 方法** (637-645 行):
+
+```java
+private ConfigProperties computeConfigProperties() {
+    // 1. 从 propertiesSupplier 创建基础配置
+    DefaultConfigProperties properties =
+        DefaultConfigProperties.create(propertiesSupplier.get(), componentLoader);
+
+    // 2. 应用所有 propertiesCustomizers
+    for (Function<ConfigProperties, Map<String, String>> customizer : propertiesCustomizers) {
+        Map<String, String> overrides = customizer.apply(properties);
+        properties = properties.withOverrides(overrides);
+    }
+
+    // 3. 应用 configPropertiesCustomizer
+    return configPropertiesCustomizer.apply(properties);
+}
+```
+
+**配置优先级**:
+
+```
+1. 系统属性 (java -Dotel.service.name=my-app)
+   ↓ 覆盖
+2. 环境变量 (OTEL_SERVICE_NAME=my-app)
+   ↓ 覆盖
+3. propertiesCustomizers (代码中动态添加)
+   ↓ 覆盖
+4. propertiesSupplier (代码中提供的默认值)
+```
+
+**示例**:
+
+```java
+// 提供默认配置
+Map<String, String> defaults = new HashMap<>();
+defaults.put("otel.service.name", "my-service");
+defaults.put("otel.traces.exporter", "otlp");
+
+AutoConfiguredOpenTelemetrySdk.builder()
+    // 添加默认值
+    .addPropertiesSupplier(() -> defaults)
+
+    // 添加动态覆盖
+    .addPropertiesCustomizer(props -> {
+        Map<String, String> overrides = new HashMap<>();
+        if (isProduction()) {
+            overrides.put("otel.traces.sampler", "traceidratio");
+            overrides.put("otel.traces.sampler.arg", "0.1");
+        }
+        return overrides;
+    })
+    .build();
+```
+
+### 阶段 4: 配置 Resource
+
+**源码位置**: 第 470-471 行
+
+```java
+Resource resource =
+    ResourceConfiguration.configureResource(config, spiHelper, resourceCustomizer);
+```
+
+**ResourceConfiguration.configureResource 流程**:
+
+```
+ResourceConfiguration.configureResource()
+│
+├─ 1. 从环境变量创建 Resource
+│   ├─ OTEL_SERVICE_NAME
+│   └─ OTEL_RESOURCE_ATTRIBUTES
+│
+├─ 2. 加载所有 ResourceProvider SPI
+│   ├─ OsResourceProvider (操作系统信息)
+│   ├─ ProcessResourceProvider (进程信息)
+│   ├─ HostResourceProvider (主机信息)
+│   ├─ ContainerResourceProvider (容器信息)
+│   └─ 自定义 ResourceProvider
+│
+├─ 3. 合并所有 Resource
+│   └─ Resource.merge()
+│
+├─ 4. 应用 resourceCustomizer
+│   └─ resourceCustomizer.apply(resource, config)
+│
+└─ 5. 返回最终 Resource
+```
+
+**Resource 示例**:
+
+```json
+{
+  "service.name": "my-service",
+  "service.version": "1.0.0",
+  "deployment.environment": "production",
+  "host.name": "server-01",
+  "host.arch": "amd64",
+  "os.type": "linux",
+  "process.pid": "12345",
+  "process.command": "java",
+  "telemetry.sdk.name": "opentelemetry",
+  "telemetry.sdk.language": "java",
+  "telemetry.sdk.version": "1.35.0"
+}
+```
+
+### 阶段 5: 构建 SDK 组件
+
+**源码位置**: 第 473-494 行
+
+```java
+// 创建资源跟踪列表
+List<Closeable> closeables = new ArrayList<>();
+
+try {
+    OpenTelemetrySdkBuilder sdkBuilder = OpenTelemetrySdk.builder();
+
+    // 5.1: 配置传播器 (Propagators)
+    ContextPropagators propagators =
+        PropagatorConfiguration.configurePropagators(config, spiHelper, propagatorCustomizer);
+    sdkBuilder.setPropagators(propagators);
+
+    // 5.2: 检查 SDK 是否启用
+    boolean sdkEnabled = !config.getBoolean("otel.sdk.disabled", false);
+    if (sdkEnabled) {
+        // 5.3: 配置 SDK 组件
+        configureSdk(sdkBuilder, config, resource, spiHelper, closeables);
+    }
+
+    // 5.4: 构建 OpenTelemetrySdk
+    OpenTelemetrySdk openTelemetrySdk = sdkBuilder.build();
+
+    // 5.5: 注册关闭钩子
+    maybeRegisterShutdownHook(openTelemetrySdk);
+
+    // 5.6: 调用监听器
+    callAutoConfigureListeners(spiHelper, openTelemetrySdk);
+
+    // 5.7: 返回结果
+    return AutoConfiguredOpenTelemetrySdk.create(openTelemetrySdk, resource, config);
+}
+```
+
+**关键设计**:
+
+1. **closeables 列表**:
+   - 跟踪所有需要关闭的资源
+   - 配置失败时自动清理
+   - 防止资源泄漏
+
+2. **Propagators 独立配置**:
+   - 传播器属于 API 层（不是 SDK 层）
+   - 即使 SDK 禁用，传播器仍然工作
+   - 支持跨进程 Context 传播
+
+3. **otel.sdk.disabled 检查**:
+   ```bash
+   # 完全禁用 SDK (仅保留 API 和 Propagators)
+   export OTEL_SDK_DISABLED=true
+   ```
+
+### configureSdk 方法详解
+
+**源码位置**: 第 515-568 行
+
+这是构建 SDK 三大 Provider 的核心方法。
+
+```java
+void configureSdk(
+    OpenTelemetrySdkBuilder sdkBuilder,
+    ConfigProperties config,
+    Resource resource,
+    SpiHelper spiHelper,
+    List<Closeable> closeables)
+```
+
+**执行顺序和原因**:
+
+#### 1. 配置 MeterProvider (521-533 行)
+
+```java
+// 创建 MeterProvider Builder
+SdkMeterProviderBuilder meterProviderBuilder = SdkMeterProvider.builder();
+meterProviderBuilder.setResource(resource);
+
+// 配置 MetricReader 和 MetricExporter
+MeterProviderConfiguration.configureMeterProvider(
+    meterProviderBuilder,
+    config,
+    spiHelper,
+    metricReaderCustomizer,
+    metricExporterCustomizer,
+    closeables);
+
+// 应用用户定制器
+meterProviderBuilder = meterProviderCustomizer.apply(meterProviderBuilder, config);
+
+// 构建并添加到 closeables
+SdkMeterProvider meterProvider = meterProviderBuilder.build();
+closeables.add(meterProvider);
+```
+
+**为什么 MeterProvider 先创建？**
+
+TracerProvider 和 LoggerProvider 需要 MeterProvider 来记录内部指标：
+- `SpanProcessor` 的处理速度、队列长度
+- `LogRecordProcessor` 的处理速度、队列长度
+- 导出器的成功/失败次数
+
+#### 2. 配置 TracerProvider (535-548 行)
+
+```java
+// 创建 TracerProvider Builder
+SdkTracerProviderBuilder tracerProviderBuilder = SdkTracerProvider.builder();
+tracerProviderBuilder.setResource(resource);
+
+// 配置 Sampler, SpanProcessor, SpanExporter
+TracerProviderConfiguration.configureTracerProvider(
+    tracerProviderBuilder,
+    config,
+    spiHelper,
+    meterProvider,  // ← 传递 MeterProvider
+    spanExporterCustomizer,
+    spanProcessorCustomizer,
+    samplerCustomizer,
+    closeables);
+
+// 应用用户定制器
+tracerProviderBuilder = tracerProviderCustomizer.apply(tracerProviderBuilder, config);
+
+// 构建并添加到 closeables
+SdkTracerProvider tracerProvider = tracerProviderBuilder.build();
+closeables.add(tracerProvider);
+```
+
+#### 3. 配置 LoggerProvider (550-562 行)
+
+```java
+// 创建 LoggerProvider Builder
+SdkLoggerProviderBuilder loggerProviderBuilder = SdkLoggerProvider.builder();
+loggerProviderBuilder.setResource(resource);
+
+// 配置 LogRecordProcessor 和 LogRecordExporter
+LoggerProviderConfiguration.configureLoggerProvider(
+    loggerProviderBuilder,
+    config,
+    spiHelper,
+    meterProvider,  // ← 传递 MeterProvider
+    logRecordExporterCustomizer,
+    logRecordProcessorCustomizer,
+    closeables);
+
+// 应用用户定制器
+loggerProviderBuilder = loggerProviderCustomizer.apply(loggerProviderBuilder, config);
+
+// 构建并添加到 closeables
+SdkLoggerProvider loggerProvider = loggerProviderBuilder.build();
+closeables.add(loggerProvider);
+```
+
+#### 4. 组装 SDK (564-567 行)
+
+```java
+sdkBuilder
+    .setTracerProvider(tracerProvider)
+    .setLoggerProvider(loggerProvider)
+    .setMeterProvider(meterProvider);
+```
+
+**Provider 配置架构**:
+
+```
+┌─────────────────────────────────────────┐
+│         configureSdk()                  │
+├─────────────────────────────────────────┤
+│                                         │
+│  1. MeterProvider                       │
+│     ↓ 先创建                            │
+│     ├─ MetricReader                     │
+│     ├─ MetricExporter                   │
+│     └─ 添加到 closeables                │
+│                                         │
+│  2. TracerProvider                      │
+│     ↓ 依赖 MeterProvider               │
+│     ├─ Sampler                          │
+│     ├─ SpanProcessor (使用 MeterProvider)│
+│     ├─ SpanExporter                     │
+│     └─ 添加到 closeables                │
+│                                         │
+│  3. LoggerProvider                      │
+│     ↓ 依赖 MeterProvider               │
+│     ├─ LogRecordProcessor (使用 MeterProvider)│
+│     ├─ LogRecordExporter                │
+│     └─ 添加到 closeables                │
+│                                         │
+│  4. 组装到 OpenTelemetrySdkBuilder      │
+│     └─ sdkBuilder.set*Provider()        │
+└─────────────────────────────────────────┘
+```
+
+### 阶段 6: 异常处理和资源清理
+
+**源码位置**: 第 495-511 行
+
+```java
+catch (RuntimeException e) {
+    // 记录错误信息
+    logger.info(
+        "Error encountered during autoconfiguration. " +
+        "Closing partially configured components.");
+
+    // 清理所有已创建的 Closeable 资源
+    for (Closeable closeable : closeables) {
+        try {
+            logger.fine("Closing " + closeable.getClass().getName());
+            closeable.close();
+        } catch (IOException ex) {
+            logger.warning(
+                "Error closing " + closeable.getClass().getName() + ": " + ex.getMessage());
+        }
+    }
+
+    // 包装异常
+    if (e instanceof ConfigurationException) {
+        throw e;  // 已经是 ConfigurationException,直接抛出
+    }
+    throw new ConfigurationException("Unexpected configuration error", e);
+}
+```
+
+**资源清理流程**:
+
+```
+配置失败
+    ↓
+遍历 closeables 列表
+    ├─ MeterProvider.close()
+    │   └─ 停止 MetricReader
+    │   └─ 关闭 MetricExporter
+    │
+    ├─ TracerProvider.close()
+    │   └─ 停止 SpanProcessor
+    │   └─ 刷新并关闭 SpanExporter
+    │
+    └─ LoggerProvider.close()
+        └─ 停止 LogRecordProcessor
+        └─ 刷新并关闭 LogRecordExporter
+    ↓
+包装为 ConfigurationException
+    ↓
+抛出异常
+```
+
+**为什么需要 closeables 列表？**
+
+1. **部分配置成功**: 如果 TracerProvider 配置成功但 LoggerProvider 失败，需要清理 TracerProvider
+2. **资源泄漏防止**: 确保所有连接、线程、文件句柄都被正确释放
+3. **一致性保证**: 失败状态下不留下任何部分初始化的组件
+
+**异常示例**:
+
+```java
+// 场景 1: 导出器配置错误
+// export OTEL_TRACES_EXPORTER=invalid-exporter
+// 结果: ConfigurationException: Unknown exporter: invalid-exporter
+
+// 场景 2: 端点连接失败
+// export OTEL_EXPORTER_OTLP_ENDPOINT=http://invalid:4317
+// 结果: 导出器创建成功,但运行时连接失败
+
+// 场景 3: 配置文件格式错误
+// export OTEL_EXPERIMENTAL_CONFIG_FILE=invalid.yaml
+// 结果: ConfigurationException: Failed to parse configuration file
+```
+
+### 关键设计模式
+
+#### 1. Builder 模式
+
+**目的**: 提供灵活的配置方式
+
+```java
+AutoConfiguredOpenTelemetrySdk.builder()
+    .addResourceCustomizer(...)          // 链式调用
+    .addTracerProviderCustomizer(...)
+    .addSpanProcessorCustomizer(...)
+    .setResultAsGlobal()
+    .build();
+```
+
+#### 2. 责任链模式 (Customizer)
+
+**目的**: 多个定制器按顺序执行
+
+```java
+// Customizer 合并实现 (662-669 行)
+private static <I, O1, O2> BiFunction<I, ConfigProperties, O2> mergeCustomizer(
+    BiFunction<? super I, ConfigProperties, ? extends O1> first,
+    BiFunction<? super O1, ConfigProperties, ? extends O2> second) {
+    return (I configured, ConfigProperties config) -> {
+        O1 firstResult = first.apply(configured, config);
+        return second.apply(firstResult, config);
+    };
+}
+
+// 使用示例
+autoConfiguration
+    .addResourceCustomizer((resource, config) ->
+        resource.toBuilder().put("attr1", "value1").build())  // Customizer 1
+    .addResourceCustomizer((resource, config) ->
+        resource.toBuilder().put("attr2", "value2").build())  // Customizer 2
+    // 最终 Resource 包含: attr1=value1, attr2=value2
+```
+
+#### 3. 资源管理模式 (RAII)
+
+**目的**: 确保资源正确释放
+
+```java
+// closeables 列表模式
+List<Closeable> closeables = new ArrayList<>();
+try {
+    SdkMeterProvider meterProvider = ...;
+    closeables.add(meterProvider);  // 跟踪资源
+
+    SdkTracerProvider tracerProvider = ...;
+    closeables.add(tracerProvider);  // 跟踪资源
+
+    // 更多资源...
+} catch (Exception e) {
+    // 自动清理所有 closeables
+    for (Closeable closeable : closeables) {
+        closeable.close();
+    }
+    throw e;
+}
+```
+
+#### 4. 模板方法模式 (configureSdk)
+
+**目的**: 标准化配置流程
+
+```java
+void configureSdk(...) {
+    // 模板方法定义标准流程
+    // 1. 配置 MeterProvider
+    SdkMeterProvider meterProvider = configureMeterProvider(...);
+
+    // 2. 配置 TracerProvider (依赖 MeterProvider)
+    SdkTracerProvider tracerProvider = configureTracerProvider(meterProvider, ...);
+
+    // 3. 配置 LoggerProvider (依赖 MeterProvider)
+    SdkLoggerProvider loggerProvider = configureLoggerProvider(meterProvider, ...);
+
+    // 4. 组装
+    sdkBuilder.set*Provider(...);
+}
+```
+
+#### 5. SPI 模式
+
+**目的**: 可扩展的组件加载
+
+```java
+// SpiHelper 加载扩展
+SpiHelper spiHelper = SpiHelper.create(componentLoader);
+
+// 加载所有 ResourceProvider 实现
+List<ResourceProvider> providers = spiHelper.loadOrdered(ResourceProvider.class);
+
+// 按 order() 排序执行
+for (ResourceProvider provider : providers) {
+    Resource r = provider.createResource(config);
+    // 合并到最终 Resource
+}
+```
+
+### 代码示例和最佳实践
+
+#### 示例 1: 理解 closeables 机制
+
+```java
+public class CloseablesExample {
+    public static void main(String[] args) {
+        List<Closeable> closeables = new ArrayList<>();
+
+        try {
+            // 模拟配置过程
+            Closeable resource1 = createResource1();
+            closeables.add(resource1);  // 成功
+
+            Closeable resource2 = createResource2();
+            closeables.add(resource2);  // 成功
+
+            Closeable resource3 = createResource3();  // 失败!
+            // resource3 不会添加到 closeables
+
+        } catch (Exception e) {
+            System.out.println("Configuration failed. Cleaning up...");
+
+            // 自动清理已创建的资源
+            for (Closeable closeable : closeables) {
+                try {
+                    closeable.close();
+                    System.out.println("Closed: " + closeable.getClass().getName());
+                } catch (IOException ex) {
+                    System.err.println("Error closing: " + ex.getMessage());
+                }
+            }
+            throw new RuntimeException("Configuration failed", e);
+        }
+    }
+}
+```
+
+#### 示例 2: 自定义 AutoConfigurationCustomizerProvider
+
+```java
+package com.example;
+
+import io.opentelemetry.sdk.autoconfigure.spi.AutoConfigurationCustomizer;
+import io.opentelemetry.sdk.autoconfigure.spi.AutoConfigurationCustomizerProvider;
+
+/**
+ * 全局定制自动配置
+ */
+public class ProductionCustomizerProvider implements AutoConfigurationCustomizerProvider {
+
+    @Override
+    public void customize(AutoConfigurationCustomizer autoConfiguration) {
+        // 1. 添加生产环境 Resource 属性
+        autoConfiguration.addResourceCustomizer((resource, config) ->
+            resource.toBuilder()
+                .put("deployment.environment", "production")
+                .put("service.namespace", "my-company")
+                .build());
+
+        // 2. 过滤内部 Span
+        autoConfiguration.addSpanProcessorCustomizer((processor, config) ->
+            new FilteringSpanProcessor(processor) {
+                @Override
+                public void onEnd(ReadableSpan span) {
+                    if (!span.getName().startsWith("internal.")) {
+                        super.onEnd(span);
+                    }
+                }
+            });
+
+        // 3. 添加日志记录导出器
+        autoConfiguration.addSpanExporterCustomizer((exporter, config) ->
+            new LoggingSpanExporter(exporter));
+    }
+
+    @Override
+    public int order() {
+        return 100;  // 在默认定制器之后执行
+    }
+}
+
+// 注册 SPI
+// 文件: META-INF/services/io.opentelemetry.sdk.autoconfigure.spi.AutoConfigurationCustomizerProvider
+// 内容: com.example.ProductionCustomizerProvider
+```
+
+#### 示例 3: 调试配置过程
+
+```java
+public class DebugAutoConfiguration {
+    public static void main(String[] args) {
+        // 启用 debug 日志
+        System.setProperty("java.util.logging.config.file", "logging.properties");
+
+        // 创建自定义 Builder
+        AutoConfiguredOpenTelemetrySdk autoConfigured =
+            AutoConfiguredOpenTelemetrySdk.builder()
+                // 打印配置属性
+                .addPropertiesCustomizer(props -> {
+                    System.out.println("=== Configuration Properties ===");
+                    props.getPropertyKeys().forEach(key ->
+                        System.out.println(key + " = " + props.getString(key)));
+                    return Collections.emptyMap();
+                })
+
+                // 打印 Resource
+                .addResourceCustomizer((resource, config) -> {
+                    System.out.println("=== Resource Attributes ===");
+                    resource.getAttributes().forEach((key, value) ->
+                        System.out.println(key + " = " + value));
+                    return resource;
+                })
+
+                // 打印 TracerProvider
+                .addTracerProviderCustomizer((builder, config) -> {
+                    System.out.println("=== TracerProvider Configuration ===");
+                    System.out.println("Sampler: " + config.getString("otel.traces.sampler"));
+                    System.out.println("Exporter: " + config.getString("otel.traces.exporter"));
+                    return builder;
+                })
+
+                .build();
+
+        OpenTelemetrySdk sdk = autoConfigured.getOpenTelemetrySdk();
+        System.out.println("=== SDK Initialized Successfully ===");
+    }
+}
+```
+
+### 常见问题
+
+#### Q1: 为什么 MeterProvider 需要先创建？
+
+**答**: TracerProvider 和 LoggerProvider 的内部组件（SpanProcessor、LogRecordProcessor）需要使用 MeterProvider 来记录内部指标。
+
+示例指标:
+- `otel.span_processor.queue.size` - Span 处理队列长度
+- `otel.span_processor.processed` - 已处理的 Span 数量
+- `otel.span_processor.dropped` - 丢弃的 Span 数量
+
+如果 MeterProvider 后创建，这些内部指标将无法记录。
+
+#### Q2: 配置失败时如何确保资源被清理？
+
+**答**: 通过 `closeables` 列表机制：
+
+```java
+List<Closeable> closeables = new ArrayList<>();
+try {
+    // 每创建一个资源就添加到列表
+    Resource r = createResource();
+    closeables.add(r);
+} catch (Exception e) {
+    // 自动清理所有已创建的资源
+    for (Closeable c : closeables) {
+        c.close();
+    }
+    throw e;
+}
+```
+
+这确保了即使配置中途失败，已创建的资源也会被正确释放。
+
+#### Q3: 如何完全禁用某个 Provider？
+
+**答**: 使用 `otel.sdk.disabled` 或信号特定的导出器配置：
+
+```bash
+# 方法 1: 完全禁用 SDK
+export OTEL_SDK_DISABLED=true
+
+# 方法 2: 禁用 Traces
+export OTEL_TRACES_EXPORTER=none
+
+# 方法 3: 禁用 Metrics
+export OTEL_METRICS_EXPORTER=none
+
+# 方法 4: 禁用 Logs
+export OTEL_LOGS_EXPORTER=none
+```
+
+#### Q4: 声明式配置和环境变量配置有什么区别？
+
+**答**:
+
+| 特性 | 声明式配置 (YAML) | 环境变量配置 |
+|------|------------------|-------------|
+| **优先级** | 更高（先执行） | 较低 |
+| **配置方式** | YAML 文件 | 环境变量/系统属性 |
+| **依赖** | 需要 incubator 模块 | 无额外依赖 |
+| **灵活性** | 结构化、可读性强 | 简单、直接 |
+| **适用场景** | 复杂配置、多环境 | 简单配置、容器化 |
+
+#### Q5: 如何调试配置过程？
+
+**答**: 使用以下方法：
+
+1. **启用 debug 日志**:
+```bash
+export OTEL_JAVAAGENT_DEBUG=true
+```
+
+2. **使用 Customizer 打印配置**:
+```java
+.addPropertiesCustomizer(props -> {
+    System.out.println("Config: " + props.getString("otel.service.name"));
+    return Collections.emptyMap();
+})
+```
+
+3. **检查 Resource**:
+```java
+Resource resource = autoConfigured.getResource();
+resource.getAttributes().forEach((key, value) ->
+    System.out.println(key + " = " + value));
+```
+
+4. **使用 LoggingExporter**:
+```bash
+export OTEL_TRACES_EXPORTER=logging
+```
+
+#### Q6: customized 标志的作用是什么？
+
+**答**: 防止重复执行定制器。
+
+```java
+if (!customized) {
+    customized = true;
+    // 执行 AutoConfigurationCustomizerProvider
+}
+```
+
+如果用户多次调用 `build()`，定制器只会在第一次执行，避免重复配置。
+
+#### Q7: 如何处理配置异常？
+
+**答**: 所有异常都会被包装为 `ConfigurationException`：
+
+```java
+try {
+    AutoConfiguredOpenTelemetrySdk sdk =
+        AutoConfiguredOpenTelemetrySdk.initialize();
+} catch (ConfigurationException e) {
+    logger.error("Failed to configure OpenTelemetry", e);
+
+    // 检查具体原因
+    if (e.getCause() instanceof ClassNotFoundException) {
+        logger.error("Missing dependency: " + e.getCause().getMessage());
+    }
+
+    // 使用降级策略
+    OpenTelemetry fallback = OpenTelemetry.noop();
+}
+```
+
+---
+
 ## 常见问题
 
 ### Q1: 环境变量未生效？

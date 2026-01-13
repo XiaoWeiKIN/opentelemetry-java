@@ -3112,574 +3112,61 @@ logger.info("Payment processed for card {}", maskedCard);
 
 ## 10. 导出器架构
 
-### 10.1 导出器接口设计
+> **详细文档**: 导出器的完整技术文档已移至 [exporters/README.zh-CN.md](exporters/README.zh-CN.md)
 
-#### 10.1.1 SpanExporter 接口
+**导出器（Exporter）** 负责将遥测数据（Traces、Metrics、Logs）发送到后端系统。OpenTelemetry Java 提供了多种导出器实现。
+
+### 10.1 核心概念
+
+**导出器类型**:
+- **OTLP 导出器**：原生协议，支持 gRPC 和 HTTP，推荐用于生产环境
+- **Zipkin 导出器**：导出到 Zipkin 后端
+- **Prometheus 导出器**：暴露 Prometheus metrics 端点
+- **Logging 导出器**：输出到日志，用于调试
 
 **核心接口**:
 ```java
 public interface SpanExporter {
-    // 导出 Span 数据
     CompletableResultCode export(Collection<SpanData> spans);
-
-    // 刷新缓冲区
     CompletableResultCode flush();
-
-    // 关闭导出器
     CompletableResultCode shutdown();
 }
 ```
 
-**CompletableResultCode**:
+类似的接口还有 `MetricExporter` 和 `LogRecordExporter`。
+
+### 10.2 快速开始
+
+**OTLP 导出器**（推荐）:
 ```java
-// 异步结果对象
-CompletableResultCode result = exporter.export(spans);
-
-// 等待完成
-result.join(10, TimeUnit.SECONDS);
-
-// 检查结果
-if (result.isSuccess()) {
-    System.out.println("Export successful");
-} else {
-    System.err.println("Export failed");
-}
-```
-
-#### 10.1.2 MetricExporter 接口
-
-```java
-public interface MetricExporter {
-    // 导出 Metric 数据
-    CompletableResultCode export(Collection<MetricData> metrics);
-
-    // 刷新缓冲区
-    CompletableResultCode flush();
-
-    // 关闭导出器
-    CompletableResultCode shutdown();
-
-    // 获取聚合时间性（Delta 或 Cumulative）
-    AggregationTemporality getAggregationTemporality(InstrumentType instrumentType);
-}
-```
-
-#### 10.1.3 LogRecordExporter 接口
-
-```java
-public interface LogRecordExporter {
-    // 导出 LogRecord 数据
-    CompletableResultCode export(Collection<LogRecordData> logs);
-
-    // 关闭导出器
-    CompletableResultCode shutdown();
-}
-```
-
-### 10.2 OTLP 协议详解
-
-#### 10.2.1 OTLP 协议概述
-
-**OTLP** (OpenTelemetry Protocol) 是 OpenTelemetry 的原生协议，支持 gRPC 和 HTTP/JSON 两种传输方式。
-
-**协议特点**:
-- ✅ 高效的 Protobuf 二进制格式（gRPC）
-- ✅ 支持 JSON 格式（HTTP）
-- ✅ 支持批量传输
-- ✅ 支持压缩（gzip）
-- ✅ 支持元数据（headers）
-- ✅ 支持重试和超时
-
-**OTLP 架构**:
-```
-Client Application
-    ↓ export
-SpanProcessor → BatchSpanProcessor
-    ↓ batch
-OtlpGrpcSpanExporter / OtlpHttpSpanExporter
-    ↓ serialize (Protobuf/JSON)
-gRPC/HTTP Client
-    ↓ network (4317/4318)
-OTLP Receiver (OpenTelemetry Collector)
-    ↓ process
-Backend (Jaeger/Prometheus/etc.)
-```
-
-#### 10.2.2 OTLP gRPC Exporter
-
-**配置 OTLP gRPC Exporter**:
-```java
-import io.opentelemetry.exporter.otlp.trace.OtlpGrpcSpanExporter;
-import io.opentelemetry.exporter.otlp.metrics.OtlpGrpcMetricExporter;
-import io.opentelemetry.exporter.otlp.logs.OtlpGrpcLogRecordExporter;
-
-// Traces
+// gRPC 传输
 SpanExporter spanExporter = OtlpGrpcSpanExporter.builder()
-    .setEndpoint("http://localhost:4317")                  // gRPC 端点
-    .setTimeout(Duration.ofSeconds(10))                    // 超时时间
-    .setCompression("gzip")                                // 压缩
-    .addHeader("api-key", "your-api-key")                  // 自定义 header
+    .setEndpoint("http://localhost:4317")
     .build();
 
-// Metrics
-MetricExporter metricExporter = OtlpGrpcMetricExporter.builder()
-    .setEndpoint("http://localhost:4317")
-    .setTimeout(Duration.ofSeconds(10))
-    .build();
-
-// Logs
-LogRecordExporter logExporter = OtlpGrpcLogRecordExporter.builder()
-    .setEndpoint("http://localhost:4317")
-    .setTimeout(Duration.ofSeconds(10))
+// HTTP 传输
+SpanExporter httpExporter = OtlpHttpSpanExporter.builder()
+    .setEndpoint("http://localhost:4318/v1/traces")
     .build();
 ```
 
 **环境变量配置**:
 ```bash
-# OTLP gRPC 端点
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
-
-# 超时时间
-export OTEL_EXPORTER_OTLP_TIMEOUT=10000
-
-# 压缩
-export OTEL_EXPORTER_OTLP_COMPRESSION=gzip
-
-# Headers
-export OTEL_EXPORTER_OTLP_HEADERS=api-key=your-api-key,other-header=value
+export OTEL_EXPORTER_OTLP_PROTOCOL=grpc  # 或 http/protobuf, http/json
 ```
 
-#### 10.2.3 OTLP HTTP Exporter
+### 10.3 更多内容
 
-**配置 OTLP HTTP Exporter**:
-```java
-import io.opentelemetry.exporter.otlp.http.trace.OtlpHttpSpanExporter;
-import io.opentelemetry.exporter.otlp.http.metrics.OtlpHttpMetricExporter;
-import io.opentelemetry.exporter.otlp.http.logs.OtlpHttpLogRecordExporter;
+**完整的导出器文档请参阅**: [exporters/README.zh-CN.md](exporters/README.zh-CN.md)
 
-// Traces
-SpanExporter spanExporter = OtlpHttpSpanExporter.builder()
-    .setEndpoint("http://localhost:4318/v1/traces")        // HTTP 端点
-    .setTimeout(Duration.ofSeconds(10))
-    .setCompression("gzip")
-    .addHeader("Authorization", "Bearer token")
-    .build();
-
-// Metrics
-MetricExporter metricExporter = OtlpHttpMetricExporter.builder()
-    .setEndpoint("http://localhost:4318/v1/metrics")
-    .build();
-
-// Logs
-LogRecordExporter logExporter = OtlpHttpLogRecordExporter.builder()
-    .setEndpoint("http://localhost:4318/v1/logs")
-    .build();
-```
-
-**环境变量配置**:
-```bash
-# OTLP HTTP 端点
-export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
-
-# 信号特定端点
-export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4318/v1/traces
-export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://localhost:4318/v1/metrics
-export OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://localhost:4318/v1/logs
-
-# Protocol (http/protobuf, http/json)
-export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
-```
-
-#### 10.2.4 OTLP Protobuf 格式
-
-**Traces Protobuf 定义**（简化）:
-```protobuf
-message TracesData {
-  repeated ResourceSpans resource_spans = 1;
-}
-
-message ResourceSpans {
-  Resource resource = 1;
-  repeated ScopeSpans scope_spans = 2;
-}
-
-message Span {
-  bytes trace_id = 1;
-  bytes span_id = 2;
-  bytes parent_span_id = 3;
-  string name = 4;
-  SpanKind kind = 5;
-  fixed64 start_time_unix_nano = 6;
-  fixed64 end_time_unix_nano = 7;
-  repeated KeyValue attributes = 8;
-  repeated Event events = 9;
-  repeated Link links = 10;
-  Status status = 11;
-}
-```
-
-### 10.3 Zipkin 导出器
-
-#### 10.3.1 Zipkin 协议
-
-**Zipkin Span 格式**:
-```json
-{
-  "traceId": "0af7651916cd43dd8448eb211c80319c",
-  "id": "b7ad6b7169203331",
-  "parentId": "a7ad6b7169203330",
-  "name": "processRequest",
-  "timestamp": 1609459200000000,
-  "duration": 150000,
-  "kind": "SERVER",
-  "localEndpoint": {
-    "serviceName": "my-service",
-    "ipv4": "192.168.1.1",
-    "port": 8080
-  },
-  "tags": {
-    "http.method": "POST",
-    "http.url": "/api/users",
-    "user.id": "12345"
-  },
-  "annotations": [
-    {
-      "timestamp": 1609459200050000,
-      "value": "Processing started"
-    }
-  ]
-}
-```
-
-#### 10.3.2 配置 Zipkin Exporter
-
-```java
-import io.opentelemetry.exporter.zipkin.ZipkinSpanExporter;
-
-SpanExporter zipkinExporter = ZipkinSpanExporter.builder()
-    .setEndpoint("http://localhost:9411/api/v2/spans")     // Zipkin 端点
-    .setTimeout(Duration.ofSeconds(10))
-    .build();
-
-SdkTracerProvider tracerProvider = SdkTracerProvider.builder()
-    .addSpanProcessor(BatchSpanProcessor.builder(zipkinExporter).build())
-    .setResource(Resource.create(
-        Attributes.of(
-            AttributeKey.stringKey("service.name"), "my-service"
-        )
-    ))
-    .build();
-```
-
-**环境变量配置**:
-```bash
-export OTEL_TRACES_EXPORTER=zipkin
-export OTEL_EXPORTER_ZIPKIN_ENDPOINT=http://localhost:9411/api/v2/spans
-```
-
-### 10.4 Prometheus 导出器
-
-#### 10.4.1 Prometheus 拉取模式
-
-**Prometheus 导出器特点**:
-- ✅ Pull 模式（Prometheus 主动抓取）
-- ✅ 暴露 HTTP 端点（默认 `/metrics`）
-- ✅ Prometheus 文本格式
-- ✅ 支持直方图（Histogram）和摘要（Summary）
-
-**配置 Prometheus Exporter**:
-```java
-import io.opentelemetry.exporter.prometheus.PrometheusHttpServer;
-
-PrometheusHttpServer prometheusServer = PrometheusHttpServer.builder()
-    .setHost("localhost")
-    .setPort(9464)
-    .build();
-
-SdkMeterProvider meterProvider = SdkMeterProvider.builder()
-    .registerMetricReader(prometheusServer)
-    .build();
-
-// Prometheus 抓取端点: http://localhost:9464/metrics
-```
-
-#### 10.4.2 Prometheus 指标格式
-
-**Counter 示例**:
-```
-# HELP http_requests_total Total number of HTTP requests
-# TYPE http_requests_total counter
-http_requests_total{endpoint="/api/users",method="GET"} 100
-http_requests_total{endpoint="/api/users",method="POST"} 50
-```
-
-**Histogram 示例**:
-```
-# HELP http_response_time_seconds HTTP response time distribution
-# TYPE http_response_time_seconds histogram
-http_response_time_seconds_bucket{endpoint="/api/users",le="0.01"} 50
-http_response_time_seconds_bucket{endpoint="/api/users",le="0.05"} 80
-http_response_time_seconds_bucket{endpoint="/api/users",le="0.1"} 95
-http_response_time_seconds_bucket{endpoint="/api/users",le="+Inf"} 100
-http_response_time_seconds_sum{endpoint="/api/users"} 3.5
-http_response_time_seconds_count{endpoint="/api/users"} 100
-```
-
-**Gauge 示例**:
-```
-# HELP memory_used_bytes Current memory usage
-# TYPE memory_used_bytes gauge
-memory_used_bytes 1073741824
-```
-
-### 10.5 批处理和重试策略
-
-#### 10.5.1 BatchSpanProcessor 配置
-
-```java
-SpanProcessor processor = BatchSpanProcessor.builder(exporter)
-    .setScheduleDelay(Duration.ofSeconds(5))              // 批处理延迟
-    .setMaxQueueSize(2048)                                // 队列最大大小
-    .setMaxExportBatchSize(512)                           // 每批最大 Span 数
-    .setExporterTimeout(Duration.ofSeconds(30))           // 导出超时
-    .build();
-```
-
-**批处理流程**:
-```
-Span.end()
-    ↓
-加入队列（非阻塞）
-    ↓
-触发批处理（满足以下任一条件）:
-    ├── 队列大小 >= maxExportBatchSize (512)
-    ├── 距离上次导出 >= scheduleDelay (5 秒)
-    └── 应用关闭（shutdown）
-    ↓
-从队列取出 maxExportBatchSize 个 Span
-    ↓
-调用 Exporter.export(spans)
-    ↓
-等待结果（最多 exporterTimeout 秒）
-    ↓
-成功: 清除已导出的 Span
-失败: 丢弃（或记录错误）
-```
-
-#### 10.5.2 OTLP 重试策略
-
-**内置重试机制**:
-```java
-OtlpGrpcSpanExporter exporter = OtlpGrpcSpanExporter.builder()
-    .setEndpoint("http://localhost:4317")
-    .setTimeout(Duration.ofSeconds(10))
-    .setRetryPolicy(RetryPolicy.getDefault())             // 默认重试策略
-    .build();
-```
-
-**默认重试策略**:
-```
-失败原因                  重试策略
-─────────────────────────────────────────────
-网络错误（连接失败）       → 重试（指数退避）
-5xx 服务器错误             → 重试（指数退避）
-4xx 客户端错误             → 不重试
-超时                       → 重试（指数退避）
-成功                       → 不重试
-```
-
-**指数退避算法**:
-```
-重试次数  延迟时间
-─────────────────
-1         1 秒
-2         2 秒
-3         4 秒
-4         8 秒
-5         16 秒
-最大重试: 5 次
-```
-
-### 10.6 自定义导出器开发
-
-#### 10.6.1 实现自定义 SpanExporter
-
-```java
-import io.opentelemetry.sdk.trace.export.SpanExporter;
-import io.opentelemetry.sdk.common.CompletableResultCode;
-import io.opentelemetry.sdk.trace.data.SpanData;
-
-public class CustomSpanExporter implements SpanExporter {
-
-    @Override
-    public CompletableResultCode export(Collection<SpanData> spans) {
-        // 自定义导出逻辑
-        try {
-            for (SpanData span : spans) {
-                // 转换为自定义格式
-                String json = convertToJson(span);
-                
-                // 发送到自定义后端
-                sendToBackend(json);
-                
-                // 记录日志
-                System.out.println("Exported span: " + span.getName());
-            }
-            return CompletableResultCode.ofSuccess();
-        } catch (Exception e) {
-            System.err.println("Export failed: " + e.getMessage());
-            return CompletableResultCode.ofFailure();
-        }
-    }
-
-    @Override
-    public CompletableResultCode flush() {
-        // 刷新缓冲区（如果有）
-        System.out.println("Flushing exporter");
-        return CompletableResultCode.ofSuccess();
-    }
-
-    @Override
-    public CompletableResultCode shutdown() {
-        // 关闭连接、释放资源
-        System.out.println("Shutting down exporter");
-        return CompletableResultCode.ofSuccess();
-    }
-
-    private String convertToJson(SpanData span) {
-        // 转换为 JSON 格式
-        return String.format(
-            "{\"traceId\":\"%s\",\"spanId\":\"%s\",\"name\":\"%s\"}",
-            span.getTraceId(),
-            span.getSpanId(),
-            span.getName()
-        );
-    }
-
-    private void sendToBackend(String json) throws Exception {
-        // 发送到自定义后端（HTTP、Kafka、数据库等）
-        // 示例：HTTP POST
-        // HttpClient client = HttpClient.newHttpClient();
-        // HttpRequest request = HttpRequest.newBuilder()
-        //     .uri(URI.create("https://my-backend.com/spans"))
-        //     .header("Content-Type", "application/json")
-        //     .POST(HttpRequest.BodyPublishers.ofString(json))
-        //     .build();
-        // client.send(request, HttpResponse.BodyHandlers.ofString());
-    }
-}
-```
-
-#### 10.6.2 注册自定义导出器
-
-```java
-SpanExporter customExporter = new CustomSpanExporter();
-
-SdkTracerProvider tracerProvider = SdkTracerProvider.builder()
-    .addSpanProcessor(BatchSpanProcessor.builder(customExporter).build())
-    .build();
-
-OpenTelemetry openTelemetry = OpenTelemetrySdk.builder()
-    .setTracerProvider(tracerProvider)
-    .buildAndRegisterGlobal();
-```
-
-#### 10.6.3 自定义导出器最佳实践
-
-**1. 实现幂等性**:
-```java
-// ✓ 好：使用唯一 ID 避免重复
-private final Set<String> exportedSpanIds = new ConcurrentHashMap<String, Boolean>().newKeySet();
-
-@Override
-public CompletableResultCode export(Collection<SpanData> spans) {
-    for (SpanData span : spans) {
-        String spanId = span.getSpanId();
-        if (exportedSpanIds.contains(spanId)) {
-            continue;  // 跳过已导出的 Span
-        }
-        sendToBackend(span);
-        exportedSpanIds.add(spanId);
-    }
-    return CompletableResultCode.ofSuccess();
-}
-```
-
-**2. 实现异步导出**:
-```java
-private final ExecutorService executor = Executors.newFixedThreadPool(4);
-
-@Override
-public CompletableResultCode export(Collection<SpanData> spans) {
-    CompletableResultCode result = new CompletableResultCode();
-    
-    executor.submit(() -> {
-        try {
-            for (SpanData span : spans) {
-                sendToBackend(span);
-            }
-            result.succeed();
-        } catch (Exception e) {
-            result.fail();
-        }
-    });
-    
-    return result;
-}
-
-@Override
-public CompletableResultCode shutdown() {
-    executor.shutdown();
-    try {
-        executor.awaitTermination(30, TimeUnit.SECONDS);
-    } catch (InterruptedException e) {
-        executor.shutdownNow();
-    }
-    return CompletableResultCode.ofSuccess();
-}
-```
-
-**3. 实现连接池**:
-```java
-// 使用连接池提高性能
-private final HttpClient httpClient = HttpClient.newBuilder()
-    .connectTimeout(Duration.ofSeconds(10))
-    .executor(Executors.newFixedThreadPool(10))
-    .build();
-```
-
-**4. 实现错误处理和重试**:
-```java
-@Override
-public CompletableResultCode export(Collection<SpanData> spans) {
-    int maxRetries = 3;
-    int retryCount = 0;
-    
-    while (retryCount < maxRetries) {
-        try {
-            sendToBackend(spans);
-            return CompletableResultCode.ofSuccess();
-        } catch (Exception e) {
-            retryCount++;
-            if (retryCount >= maxRetries) {
-                System.err.println("Export failed after " + maxRetries + " retries");
-                return CompletableResultCode.ofFailure();
-            }
-            
-            // 指数退避
-            long delay = (long) Math.pow(2, retryCount) * 1000;
-            try {
-                Thread.sleep(delay);
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-                return CompletableResultCode.ofFailure();
-            }
-        }
-    }
-    
-    return CompletableResultCode.ofFailure();
-}
-```
+包含以下详细内容：
+- OTLP 协议详解（gRPC vs HTTP, Protobuf vs JSON）
+- Zipkin、Prometheus、Logging 导出器
+- 批处理和重试策略
+- 自定义导出器开发
+- 性能优化和故障排查
+- OTLP 导出器源码级深度解析
 
 ---
 
@@ -4617,608 +4104,76 @@ span.setAttribute(SemanticAttributes.HTTP_METHOD, "POST");  // 另一处
 
 ## 21. 导出器详解
 
-### 21.1 导出器概述
+> **完整文档**: 导出器的详细技术文档已独立至 [exporters/README.zh-CN.md](exporters/README.zh-CN.md)
 
-**导出器（Exporter）** 负责将遥测数据发送到后端系统。OpenTelemetry Java 提供了多种导出器实现，支持不同的协议和后端。
+本章提供导出器的简要概述。完整的导出器文档包含：
 
-**模块位置**: `exporters/`
+**核心内容**:
+- **OTLP 导出器**：gRPC vs HTTP, Protobuf vs JSON 序列化
+- **Zipkin 导出器**：Zipkin 协议和数据格式
+- **Prometheus 导出器**：Pull 模式和指标格式
+- **Logging 导出器**：调试用途
+- **批处理和重试**：性能优化策略
+- **自定义导出器**：开发指南和最佳实践
+- **源码解析**：OTLP 导出器的实现细节
 
-**导出器分类**:
-```
-exporters/
-├── otlp/                   # OTLP 协议（推荐）
-│   ├── all/                # 聚合所有 OTLP 导出器
-│   ├── common/             # OTLP 通用组件
-│   └── profiles/           # OTLP Profiles 支持
-├── zipkin/                 # Zipkin 格式
-├── prometheus/             # Prometheus 格式
-├── logging/                # 日志输出（调试）
-└── logging-otlp/           # OTLP 格式日志
-```
+### 21.1 导出器类型
 
-### 21.2 OTLP 导出器详解
-
-#### 21.2.1 OTLP 协议概述
-
-**OTLP (OpenTelemetry Protocol)** 是 OpenTelemetry 的原生协议，具有以下特点：
-- ✅ 支持 gRPC 和 HTTP 传输
-- ✅ Protobuf 和 JSON 编码
-- ✅ 批量传输和压缩
-- ✅ 支持所有信号（Traces、Metrics、Logs）
-- ✅ 高性能和低开销
-
-**协议端点**:
-```
-gRPC:  http://localhost:4317
-HTTP:  http://localhost:4318
-  ├── /v1/traces
-  ├── /v1/metrics
-  └── /v1/logs
-```
-
-#### 21.2.2 OTLP gRPC 导出器
-
-**添加依赖**:
-```kotlin
-dependencies {
-    implementation("io.opentelemetry:opentelemetry-exporter-otlp")
-}
-```
-
-**配置 Traces 导出**:
+**OTLP 导出器**（推荐用于生产）:
 ```java
-import io.opentelemetry.exporter.otlp.trace.OtlpGrpcSpanExporter;
-import io.opentelemetry.sdk.trace.export.SpanExporter;
-
-SpanExporter spanExporter = OtlpGrpcSpanExporter.builder()
+// gRPC
+SpanExporter grpcExporter = OtlpGrpcSpanExporter.builder()
     .setEndpoint("http://localhost:4317")
-    .setTimeout(Duration.ofSeconds(10))
-    .setCompression("gzip")
-    .addHeader("api-key", "your-api-key")
     .build();
 
-SdkTracerProvider tracerProvider = SdkTracerProvider.builder()
-    .addSpanProcessor(BatchSpanProcessor.builder(spanExporter).build())
-    .build();
-```
-
-**配置 Metrics 导出**:
-```java
-import io.opentelemetry.exporter.otlp.metrics.OtlpGrpcMetricExporter;
-import io.opentelemetry.sdk.metrics.export.MetricExporter;
-
-MetricExporter metricExporter = OtlpGrpcMetricExporter.builder()
-    .setEndpoint("http://localhost:4317")
-    .setTimeout(Duration.ofSeconds(10))
-    .build();
-
-SdkMeterProvider meterProvider = SdkMeterProvider.builder()
-    .registerMetricReader(
-        PeriodicMetricReader.builder(metricExporter)
-            .setInterval(Duration.ofSeconds(60))
-            .build()
-    )
-    .build();
-```
-
-**配置 Logs 导出**:
-```java
-import io.opentelemetry.exporter.otlp.logs.OtlpGrpcLogRecordExporter;
-import io.opentelemetry.sdk.logs.export.LogRecordExporter;
-
-LogRecordExporter logExporter = OtlpGrpcLogRecordExporter.builder()
-    .setEndpoint("http://localhost:4317")
-    .setTimeout(Duration.ofSeconds(10))
-    .build();
-
-SdkLoggerProvider loggerProvider = SdkLoggerProvider.builder()
-    .addLogRecordProcessor(
-        BatchLogRecordProcessor.builder(logExporter).build()
-    )
-    .build();
-```
-
-#### 21.2.3 OTLP HTTP 导出器
-
-**配置 HTTP 导出**:
-```java
-import io.opentelemetry.exporter.otlp.http.trace.OtlpHttpSpanExporter;
-
-SpanExporter spanExporter = OtlpHttpSpanExporter.builder()
+// HTTP
+SpanExporter httpExporter = OtlpHttpSpanExporter.builder()
     .setEndpoint("http://localhost:4318/v1/traces")
-    .setTimeout(Duration.ofSeconds(10))
-    .setCompression("gzip")
-    .addHeader("Authorization", "Bearer token")
     .build();
 ```
 
-**HTTP vs gRPC 对比**:
-
-| 特性 | gRPC | HTTP |
-|------|------|------|
-| 性能 | 更高（二进制协议） | 较低（文本协议） |
-| 压缩 | 内置支持 | 需手动配置 |
-| 流式传输 | 支持 | 不支持 |
-| 防火墙友好 | 较差（非标准端口） | 更好（HTTP/HTTPS） |
-| 调试 | 较困难 | 更容易（可读格式） |
-
-**选择建议**:
-- **生产环境**: 优先使用 gRPC（高性能）
-- **防火墙限制**: 使用 HTTP
-- **调试**: 使用 HTTP + JSON 格式
-
-#### 21.2.4 OTLP 环境变量配置
-
-**通用配置**:
-```bash
-# OTLP 端点（gRPC 或 HTTP）
-export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
-
-# 协议（grpc, http/protobuf, http/json）
-export OTEL_EXPORTER_OTLP_PROTOCOL=grpc
-
-# 超时时间（毫秒）
-export OTEL_EXPORTER_OTLP_TIMEOUT=10000
-
-# 压缩（gzip, none）
-export OTEL_EXPORTER_OTLP_COMPRESSION=gzip
-
-# Headers
-export OTEL_EXPORTER_OTLP_HEADERS=api-key=your-key,other-header=value
-```
-
-**信号特定配置**:
-```bash
-# Traces 特定端点
-export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4318/v1/traces
-export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf
-export OTEL_EXPORTER_OTLP_TRACES_HEADERS=trace-api-key=key
-
-# Metrics 特定端点
-export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://localhost:4318/v1/metrics
-export OTEL_EXPORTER_OTLP_METRICS_PROTOCOL=http/protobuf
-
-# Logs 特定端点
-export OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://localhost:4318/v1/logs
-export OTEL_EXPORTER_OTLP_LOGS_PROTOCOL=http/protobuf
-```
-
-### 21.3 Zipkin 导出器
-
-#### 21.3.1 Zipkin 集成
-
-**添加依赖**:
-```kotlin
-dependencies {
-    implementation("io.opentelemetry:opentelemetry-exporter-zipkin")
-}
-```
-
-**配置 Zipkin 导出器**:
+**其他导出器**:
 ```java
-import io.opentelemetry.exporter.zipkin.ZipkinSpanExporter;
-
+// Zipkin
 SpanExporter zipkinExporter = ZipkinSpanExporter.builder()
     .setEndpoint("http://localhost:9411/api/v2/spans")
-    .setTimeout(Duration.ofSeconds(10))
     .build();
 
-SdkTracerProvider tracerProvider = SdkTracerProvider.builder()
-    .addSpanProcessor(BatchSpanProcessor.builder(zipkinExporter).build())
-    .setResource(Resource.create(
-        Attributes.of(
-            ResourceAttributes.SERVICE_NAME, "my-service"
-        )
-    ))
-    .build();
-```
-
-**环境变量配置**:
-```bash
-export OTEL_TRACES_EXPORTER=zipkin
-export OTEL_EXPORTER_ZIPKIN_ENDPOINT=http://localhost:9411/api/v2/spans
-```
-
-#### 21.3.2 Zipkin 数据格式
-
-**Zipkin Span JSON 格式**:
-```json
-{
-  "traceId": "0af7651916cd43dd8448eb211c80319c",
-  "id": "b7ad6b7169203331",
-  "parentId": "a7ad6b7169203330",
-  "name": "GET /users",
-  "timestamp": 1704715200000000,
-  "duration": 150000,
-  "kind": "SERVER",
-  "localEndpoint": {
-    "serviceName": "my-service",
-    "ipv4": "192.168.1.1",
-    "port": 8080
-  },
-  "tags": {
-    "http.method": "GET",
-    "http.url": "/users",
-    "http.status_code": "200"
-  },
-  "annotations": [
-    {
-      "timestamp": 1704715200050000,
-      "value": "Processing started"
-    }
-  ]
-}
-```
-
-### 21.4 Prometheus 导出器
-
-#### 21.4.1 Prometheus 集成
-
-**添加依赖**:
-```kotlin
-dependencies {
-    implementation("io.opentelemetry:opentelemetry-exporter-prometheus")
-}
-```
-
-**配置 Prometheus HTTP Server**:
-```java
-import io.opentelemetry.exporter.prometheus.PrometheusHttpServer;
-
+// Prometheus (metrics only)
 PrometheusHttpServer prometheusServer = PrometheusHttpServer.builder()
-    .setHost("localhost")
     .setPort(9464)
     .build();
 
-SdkMeterProvider meterProvider = SdkMeterProvider.builder()
-    .registerMetricReader(prometheusServer)
-    .build();
-
-// Prometheus 抓取端点: http://localhost:9464/metrics
-```
-
-**创建指标**:
-```java
-Meter meter = meterProvider.get("my-service");
-
-LongCounter requestCounter = meter.counterBuilder("http_requests_total")
-    .setDescription("Total HTTP requests")
-    .setUnit("1")
-    .build();
-
-requestCounter.add(1,
-    Attributes.of(
-        AttributeKey.stringKey("method"), "GET",
-        AttributeKey.stringKey("endpoint"), "/api/users",
-        AttributeKey.stringKey("status"), "200"
-    )
-);
-```
-
-#### 21.4.2 Prometheus 指标格式
-
-**访问 http://localhost:9464/metrics**:
-```
-# HELP http_requests_total Total HTTP requests
-# TYPE http_requests_total counter
-http_requests_total{method="GET",endpoint="/api/users",status="200"} 100.0
-
-# HELP http_response_time_seconds HTTP response time
-# TYPE http_response_time_seconds histogram
-http_response_time_seconds_bucket{endpoint="/api/users",le="0.01"} 50.0
-http_response_time_seconds_bucket{endpoint="/api/users",le="0.05"} 80.0
-http_response_time_seconds_bucket{endpoint="/api/users",le="0.1"} 95.0
-http_response_time_seconds_bucket{endpoint="/api/users",le="+Inf"} 100.0
-http_response_time_seconds_sum{endpoint="/api/users"} 3.5
-http_response_time_seconds_count{endpoint="/api/users"} 100.0
-
-# HELP system_memory_usage_bytes Memory usage
-# TYPE system_memory_usage_bytes gauge
-system_memory_usage_bytes{state="used"} 1.073741824E9
-```
-
-### 21.5 Logging 导出器（调试）
-
-#### 21.5.1 配置日志导出器
-
-**Traces**:
-```java
-import io.opentelemetry.exporter.logging.LoggingSpanExporter;
-
+// Logging (debugging)
 SpanExporter loggingExporter = LoggingSpanExporter.create();
-
-SdkTracerProvider tracerProvider = SdkTracerProvider.builder()
-    .addSpanProcessor(SimpleSpanProcessor.create(loggingExporter))
-    .build();
 ```
 
-**Metrics**:
-```java
-import io.opentelemetry.exporter.logging.LoggingMetricExporter;
+### 21.2 常用配置
 
-MetricExporter loggingExporter = LoggingMetricExporter.create();
-
-SdkMeterProvider meterProvider = SdkMeterProvider.builder()
-    .registerMetricReader(
-        PeriodicMetricReader.builder(loggingExporter)
-            .setInterval(Duration.ofSeconds(60))
-            .build()
-    )
-    .build();
+**环境变量**:
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+export OTEL_EXPORTER_OTLP_PROTOCOL=grpc  # grpc, http/protobuf, http/json
+export OTEL_EXPORTER_OTLP_COMPRESSION=gzip
 ```
 
-**Logs**:
-```java
-import io.opentelemetry.exporter.logging.LoggingLogRecordExporter;
-
-LogRecordExporter loggingExporter = LoggingLogRecordExporter.create();
-
-SdkLoggerProvider loggerProvider = SdkLoggerProvider.builder()
-    .addLogRecordProcessor(SimpleLogRecordProcessor.create(loggingExporter))
-    .build();
-```
-
-#### 21.5.2 OTLP 格式日志导出
-
-**输出 OTLP JSON 格式（调试）**:
-```java
-import io.opentelemetry.exporter.logging.otlp.OtlpJsonLoggingSpanExporter;
-import io.opentelemetry.exporter.logging.otlp.OtlpJsonLoggingMetricExporter;
-import io.opentelemetry.exporter.logging.otlp.OtlpJsonLoggingLogRecordExporter;
-
-// Traces
-SpanExporter otlpLoggingExporter = OtlpJsonLoggingSpanExporter.create();
-
-// Metrics
-MetricExporter otlpMetricLoggingExporter = OtlpJsonLoggingMetricExporter.create();
-
-// Logs
-LogRecordExporter otlpLogLoggingExporter = OtlpJsonLoggingLogRecordExporter.create();
-```
-
-**输出示例**（OTLP JSON 格式）:
-```json
-{
-  "resourceSpans": [{
-    "resource": {
-      "attributes": [{
-        "key": "service.name",
-        "value": { "stringValue": "my-service" }
-      }]
-    },
-    "scopeSpans": [{
-      "spans": [{
-        "traceId": "0af7651916cd43dd8448eb211c80319c",
-        "spanId": "b7ad6b7169203331",
-        "name": "GET /users",
-        "kind": "SPAN_KIND_SERVER",
-        "startTimeUnixNano": "1704715200000000000",
-        "endTimeUnixNano": "1704715200150000000",
-        "attributes": [{
-          "key": "http.method",
-          "value": { "stringValue": "GET" }
-        }]
-      }]
-    }]
-  }]
-}
-```
-
-### 21.6 多导出器配置
-
-#### 21.6.1 同时导出到多个后端
-
-```java
-// 创建多个导出器
-SpanExporter otlpExporter = OtlpGrpcSpanExporter.builder()
-    .setEndpoint("http://localhost:4317")
-    .build();
-
-SpanExporter zipkinExporter = ZipkinSpanExporter.builder()
-    .setEndpoint("http://localhost:9411/api/v2/spans")
-    .build();
-
-SpanExporter loggingExporter = LoggingSpanExporter.create();
-
-// 添加多个 SpanProcessor
-SdkTracerProvider tracerProvider = SdkTracerProvider.builder()
-    .addSpanProcessor(BatchSpanProcessor.builder(otlpExporter).build())
-    .addSpanProcessor(BatchSpanProcessor.builder(zipkinExporter).build())
-    .addSpanProcessor(SimpleSpanProcessor.create(loggingExporter))
-    .build();
-```
-
-#### 21.6.2 使用 MultiSpanExporter
-
-```java
-import io.opentelemetry.sdk.trace.export.SpanExporter;
-import java.util.Arrays;
-
-// 包装多个导出器
-SpanExporter multiExporter = SpanExporter.composite(
-    Arrays.asList(otlpExporter, zipkinExporter, loggingExporter)
-);
-
-SdkTracerProvider tracerProvider = SdkTracerProvider.builder()
-    .addSpanProcessor(BatchSpanProcessor.builder(multiExporter).build())
-    .build();
-```
-
-### 21.7 导出器性能优化
-
-#### 21.7.1 批处理配置
-
+**批处理优化**:
 ```java
 BatchSpanProcessor processor = BatchSpanProcessor.builder(exporter)
-    .setScheduleDelay(Duration.ofSeconds(5))      // 批处理延迟
-    .setMaxQueueSize(2048)                        // 队列大小
-    .setMaxExportBatchSize(512)                   // 批大小
-    .setExporterTimeout(Duration.ofSeconds(30))   // 导出超时
-    .build();
-```
-
-**参数调优建议**:
-
-| 参数 | 默认值 | 低吞吐量 | 高吞吐量 | 低延迟 |
-|------|--------|----------|----------|--------|
-| scheduleDelay | 5s | 10s | 1s | 500ms |
-| maxQueueSize | 2048 | 512 | 8192 | 2048 |
-| maxExportBatchSize | 512 | 128 | 2048 | 256 |
-| exporterTimeout | 30s | 30s | 60s | 10s |
-
-#### 21.7.2 压缩配置
-
-```java
-// 启用 gzip 压缩（推荐）
-OtlpGrpcSpanExporter.builder()
-    .setCompression("gzip")
-    .build();
-
-// 压缩效果：减少 70-90% 的网络传输
-```
-
-#### 21.7.3 连接池配置
-
-**gRPC 连接管理**:
-```java
-// gRPC 自动管理连接池
-// 默认配置已经足够好，通常不需要手动配置
-```
-
-### 21.8 故障排查
-
-#### 21.8.1 导出失败诊断
-
-**启用详细日志**:
-```bash
-java -Djava.util.logging.config.file=logging.properties YourApp
-```
-
-**logging.properties**:
-```properties
-io.opentelemetry.exporter.level=FINE
-io.opentelemetry.sdk.trace.export.level=FINE
-```
-
-**常见问题**:
-
-**问题 1: 连接被拒绝**
-```
-Error: Connection refused: localhost/127.0.0.1:4317
-```
-**解决**: 检查 Collector 是否运行，端口是否正确
-
-**问题 2: 超时**
-```
-Error: DEADLINE_EXCEEDED: deadline exceeded after 10s
-```
-**解决**: 增加超时时间或检查网络延迟
-
-**问题 3: 认证失败**
-```
-Error: UNAUTHENTICATED: invalid authentication credentials
-```
-**解决**: 检查 API Key 或 Token 配置
-
-#### 21.8.2 性能问题诊断
-
-**检查队列大小**:
-```java
-// 自定义 SpanProcessor 监控队列
-public class MonitoredBatchSpanProcessor implements SpanProcessor {
-    private final BatchSpanProcessor delegate;
-
-    @Override
-    public void onEnd(ReadableSpan span) {
-        delegate.onEnd(span);
-        // 监控队列大小
-        System.out.println("Queue size: " + getCurrentQueueSize());
-    }
-}
-```
-
-**检查导出延迟**:
-```java
-SpanExporter instrumentedExporter = new SpanExporter() {
-    private final SpanExporter delegate = otlpExporter;
-
-    @Override
-    public CompletableResultCode export(Collection<SpanData> spans) {
-        long start = System.currentTimeMillis();
-        CompletableResultCode result = delegate.export(spans);
-        result.whenComplete(() -> {
-            long duration = System.currentTimeMillis() - start;
-            System.out.println("Export took " + duration + "ms for " + spans.size() + " spans");
-        });
-        return result;
-    }
-};
-```
-
-### 21.9 最佳实践
-
-#### 21.9.1 生产环境推荐配置
-
-```java
-// 推荐：使用 OTLP + gRPC + 批处理
-SpanExporter exporter = OtlpGrpcSpanExporter.builder()
-    .setEndpoint("http://collector:4317")
-    .setTimeout(Duration.ofSeconds(30))
-    .setCompression("gzip")
-    .build();
-
-SpanProcessor processor = BatchSpanProcessor.builder(exporter)
     .setScheduleDelay(Duration.ofSeconds(5))
     .setMaxQueueSize(2048)
     .setMaxExportBatchSize(512)
     .build();
-
-SdkTracerProvider tracerProvider = SdkTracerProvider.builder()
-    .addSpanProcessor(processor)
-    .setResource(Resource.create(
-        Attributes.of(
-            ResourceAttributes.SERVICE_NAME, "my-service",
-            ResourceAttributes.SERVICE_VERSION, "1.0.0",
-            ResourceAttributes.DEPLOYMENT_ENVIRONMENT, "production"
-        )
-    ))
-    .build();
 ```
 
-#### 21.9.2 开发环境推荐配置
+### 21.3 更多信息
 
-```java
-// 开发：使用 Logging 导出器 + OTLP JSON 格式
-SpanExporter loggingExporter = OtlpJsonLoggingSpanExporter.create();
-
-SdkTracerProvider tracerProvider = SdkTracerProvider.builder()
-    .addSpanProcessor(SimpleSpanProcessor.create(loggingExporter))
-    .build();
-```
-
-#### 21.9.3 混合环境配置
-
-```java
-// 生产：OTLP + 日志（错误时）
-SpanExporter otlpExporter = OtlpGrpcSpanExporter.builder()
-    .setEndpoint("http://collector:4317")
-    .build();
-
-SpanExporter loggingExporter = LoggingSpanExporter.create();
-
-// 正常：导出到 OTLP
-// 错误：额外导出到日志
-SpanProcessor processor = new ConditionalSpanProcessor(
-    BatchSpanProcessor.builder(otlpExporter).build(),
-    SimpleSpanProcessor.create(loggingExporter)
-);
-```
+完整的导出器文档请访问: [exporters/README.zh-CN.md](exporters/README.zh-CN.md)
 
 ---
 
 **相关章节**:
-- ← 上一节: [10. 导出器架构](#10-导出器架构)
-- → 下一节: [22. 扩展模块](#22-扩展模块)
+- ← 上一节: [20. Semconv（语义约定）](#20-semconv语义约定)
 - ↑ 返回目录: [目录](#📑-目录)
 
 ---

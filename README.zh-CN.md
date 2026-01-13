@@ -3684,8 +3684,1541 @@ public CompletableResultCode export(Collection<SpanData> spans) {
 ---
 
 **相关章节**:
-- ← 上一节: [8. Metrics（指标收集）](#8-metrics指标收集)
+- ← 上一节: [8. Metrics（指标收集)](#8-metrics指标收集)
 - → 下一节: [11. 构建系统（buildSrc）](#11-构建系统buildsrc)
+- ↑ 返回目录: [目录](#📑-目录)
+
+---
+
+# 第四部分：核心组件
+
+## 19. Context 模块详解
+
+### 19.1 Context 模块概述
+
+**Context 模块**是 OpenTelemetry Java 的基础设施层，提供了跨 API 边界和线程传播作用域值的机制。它是整个 SDK 的基石，支撑着 Span、Baggage 等上下文信息的传播。
+
+**模块位置**: `context/`
+
+**核心特性**:
+- ✅ 不可变的 Context 对象
+- ✅ ThreadLocal 存储机制
+- ✅ 作用域（Scope）管理
+- ✅ 跨线程传播支持
+- ✅ 严格模式调试
+- ✅ 无依赖（零依赖模块）
+
+**架构图**:
+```
+User Code
+    ↓ 使用
+Context API (不可变)
+    ├── Context.current()
+    ├── Context.with(key, value)
+    └── Context.makeCurrent()
+    ↓ 存储
+ContextStorage (SPI)
+    ├── ThreadLocalContextStorage (默认)
+    ├── StrictContextStorage (调试)
+    └── 自定义实现
+    ↓ 底层
+ThreadLocal<Context>
+```
+
+### 19.2 Context API 详解
+
+#### 19.2.1 核心接口
+
+**Context 接口**:
+```java
+public interface Context {
+    // 获取当前 Context
+    static Context current();
+
+    // 获取根 Context
+    static Context root();
+
+    // 创建新 Context（添加键值对）
+    <V> Context with(ContextKey<V> key, V value);
+
+    // 获取值
+    <V> V get(ContextKey<V> key);
+
+    // 使 Context 成为当前（返回 Scope）
+    @MustBeClosed
+    Scope makeCurrent();
+
+    // 包装 Runnable（自动传播 Context）
+    Runnable wrap(Runnable runnable);
+
+    // 包装 Callable
+    <T> Callable<T> wrap(Callable<T> callable);
+
+    // 包装 Executor
+    Executor wrap(Executor executor);
+
+    // 包装 ExecutorService
+    ExecutorService wrap(ExecutorService executorService);
+}
+```
+
+**Scope 接口**:
+```java
+public interface Scope extends AutoCloseable {
+    @Override
+    void close();
+}
+```
+
+#### 19.2.2 ContextKey 使用
+
+**创建 ContextKey**:
+```java
+import io.opentelemetry.context.Context;
+import io.opentelemetry.context.ContextKey;
+
+public class MyService {
+    // 创建 ContextKey（通常为静态常量）
+    private static final ContextKey<String> USER_ID_KEY =
+        ContextKey.named("user.id");
+
+    private static final ContextKey<String> REQUEST_ID_KEY =
+        ContextKey.named("request.id");
+
+    public void processRequest(String userId, String requestId) {
+        // 存储值到 Context
+        Context context = Context.current()
+            .with(USER_ID_KEY, userId)
+            .with(REQUEST_ID_KEY, requestId);
+
+        // 使 Context 成为当前
+        try (Scope scope = context.makeCurrent()) {
+            // 在此作用域内，所有代码都可以访问这些值
+            doWork();
+        }
+    }
+
+    private void doWork() {
+        // 获取当前 Context 的值
+        String userId = USER_ID_KEY.get();
+        String requestId = REQUEST_ID_KEY.get();
+
+        System.out.println("Processing request " + requestId +
+                          " for user " + userId);
+    }
+}
+```
+
+#### 19.2.3 Context 不可变性
+
+**Context 是不可变的**，每次调用 `with()` 都会创建新的 Context 对象：
+
+```java
+Context parent = Context.current();
+Context child = parent.with(USER_ID_KEY, "12345");
+
+// parent 和 child 是不同的对象
+assert parent != child;
+
+// parent 不包含 USER_ID_KEY
+assert parent.get(USER_ID_KEY) == null;
+
+// child 包含 USER_ID_KEY
+assert "12345".equals(child.get(USER_ID_KEY));
+```
+
+**优势**:
+- ✅ 线程安全（无需同步）
+- ✅ 可以安全地跨线程传递
+- ✅ 避免意外修改
+
+### 19.3 ContextStorage 实现
+
+#### 19.3.1 ThreadLocalContextStorage（默认）
+
+**实现原理**:
+```java
+public final class ThreadLocalContextStorage implements ContextStorage {
+    private static final ThreadLocal<Context> THREAD_LOCAL_CONTEXT =
+        new ThreadLocal<Context>() {
+            @Override
+            protected Context initialValue() {
+                return ArrayBasedContext.root();
+            }
+        };
+
+    @Override
+    public Context current() {
+        return THREAD_LOCAL_CONTEXT.get();
+    }
+
+    @Override
+    public Scope attach(Context toAttach) {
+        Context current = current();
+        THREAD_LOCAL_CONTEXT.set(toAttach);
+
+        return () -> {
+            THREAD_LOCAL_CONTEXT.set(current);  // 恢复之前的 Context
+        };
+    }
+}
+```
+
+**特点**:
+- ✅ 基于 ThreadLocal，每个线程独立的 Context
+- ✅ 高性能（无锁）
+- ✅ 自动隔离不同线程的 Context
+
+**使用示例**:
+```java
+// 在主线程中
+Context context = Context.current().with(USER_ID_KEY, "12345");
+
+try (Scope scope = context.makeCurrent()) {
+    // 主线程可以访问
+    assert "12345".equals(USER_ID_KEY.get());
+
+    // 新线程无法访问（ThreadLocal 隔离）
+    new Thread(() -> {
+        assert USER_ID_KEY.get() == null;  // 新线程的 Context 是独立的
+    }).start();
+}
+```
+
+#### 19.3.2 StrictContextStorage（调试模式）
+
+**启用严格模式**:
+```bash
+java -Dio.opentelemetry.context.enableStrictContext=true YourApp
+```
+
+**严格模式检查**:
+1. **Scope 必须在创建它的线程中关闭**
+2. **Scope 不能被垃圾回收前未关闭**
+3. **检测 Kotlin 协程中的错误使用**
+
+**示例 - 检测跨线程关闭错误**:
+```java
+Context context = Context.current().with(USER_ID_KEY, "12345");
+Scope scope = context.makeCurrent();
+
+// ❌ 错误：在不同线程中关闭
+new Thread(() -> {
+    scope.close();  // 抛出异常：Scope closed on different thread!
+}).start();
+```
+
+**示例 - 检测未关闭的 Scope**:
+```java
+// ❌ 错误：忘记关闭 Scope
+void badMethod() {
+    Context context = Context.current().with(USER_ID_KEY, "12345");
+    Scope scope = context.makeCurrent();
+
+    // 忘记 scope.close()
+    // 严格模式会在 GC 时打印警告
+}
+```
+
+#### 19.3.3 自定义 ContextStorage
+
+**实现自定义存储**:
+```java
+import io.opentelemetry.context.Context;
+import io.opentelemetry.context.ContextStorage;
+import io.opentelemetry.context.Scope;
+
+public class CustomContextStorage implements ContextStorage {
+    // 自定义存储机制（如 InheritableThreadLocal、协程上下文等）
+    private static final InheritableThreadLocal<Context> CONTEXT =
+        new InheritableThreadLocal<Context>() {
+            @Override
+            protected Context initialValue() {
+                return Context.root();
+            }
+        };
+
+    @Override
+    public Context current() {
+        return CONTEXT.get();
+    }
+
+    @Override
+    public Scope attach(Context toAttach) {
+        Context previous = current();
+        CONTEXT.set(toAttach);
+
+        return () -> CONTEXT.set(previous);
+    }
+}
+```
+
+**注册自定义存储**:
+
+通过 SPI 机制，创建文件 `META-INF/services/io.opentelemetry.context.ContextStorageProvider`:
+```
+com.example.CustomContextStorageProvider
+```
+
+**Provider 实现**:
+```java
+public class CustomContextStorageProvider implements ContextStorageProvider {
+    @Override
+    public ContextStorage get() {
+        return new CustomContextStorage();
+    }
+}
+```
+
+### 19.4 跨线程传播
+
+#### 19.4.1 Context.wrap() 方法
+
+**自动传播 Context**:
+```java
+Context context = Context.current().with(USER_ID_KEY, "12345");
+
+// 包装 Runnable
+Runnable task = context.wrap(() -> {
+    // 自动在正确的 Context 中执行
+    assert "12345".equals(USER_ID_KEY.get());
+    System.out.println("Task executed with user " + USER_ID_KEY.get());
+});
+
+// 在新线程中执行
+new Thread(task).start();
+```
+
+**包装 Callable**:
+```java
+Callable<String> task = context.wrap(() -> {
+    return "Result for user " + USER_ID_KEY.get();
+});
+
+String result = executorService.submit(task).get();
+```
+
+**包装 Executor**:
+```java
+Executor wrappedExecutor = context.wrap(executor);
+
+// 所有提交的任务都会在正确的 Context 中执行
+wrappedExecutor.execute(() -> {
+    assert "12345".equals(USER_ID_KEY.get());
+});
+```
+
+#### 19.4.2 手动传播
+
+**手动捕获和恢复**:
+```java
+// 在父线程中捕获
+Context context = Context.current();
+
+// 在子线程中恢复
+new Thread(() -> {
+    try (Scope scope = context.makeCurrent()) {
+        // 现在可以访问父线程的 Context
+        doWork();
+    }
+}).start();
+```
+
+#### 19.4.3 CompletableFuture 传播
+
+**使用 Context.wrap()**:
+```java
+Context context = Context.current().with(USER_ID_KEY, "12345");
+
+CompletableFuture.supplyAsync(
+    context.wrap(() -> {
+        return "User: " + USER_ID_KEY.get();
+    })
+).thenAccept(result -> {
+    System.out.println(result);
+});
+```
+
+**使用自定义 Executor**:
+```java
+Executor contextAwareExecutor = Context.taskWrapping(
+    Executors.newFixedThreadPool(10)
+);
+
+CompletableFuture.supplyAsync(() -> {
+    // Context 自动传播
+    return USER_ID_KEY.get();
+}, contextAwareExecutor);
+```
+
+### 19.5 Context 与 Span 的集成
+
+#### 19.5.1 Span 存储在 Context 中
+
+**Span 使用 Context 传播**:
+```java
+// Span 被存储在 Context 中
+Span span = tracer.spanBuilder("operation").startSpan();
+
+// makeCurrent() 将 Span 放入 Context
+try (Scope scope = span.makeCurrent()) {
+    // 获取当前 Span
+    Span currentSpan = Span.current();
+    assert currentSpan == span;
+
+    // 创建子 Span（自动继承父 Context）
+    Span childSpan = tracer.spanBuilder("child").startSpan();
+    try (Scope childScope = childSpan.makeCurrent()) {
+        // childSpan 的父 Span 是 span
+    } finally {
+        childSpan.end();
+    }
+} finally {
+    span.end();
+}
+```
+
+#### 19.5.2 Context 传播链路
+
+```
+Thread 1
+└── Context (root)
+    └── Context (userId=12345)
+        └── Context (+ Span A)
+            └── Context (+ Span B)
+                └── 传播到 Thread 2
+                    └── Context (userId=12345, Span B)
+                        └── Context (+ Span C)
+```
+
+### 19.6 最佳实践
+
+#### 19.6.1 始终使用 try-with-resources
+
+```java
+// ✅ 正确：自动关闭 Scope
+try (Scope scope = context.makeCurrent()) {
+    doWork();
+}
+
+// ❌ 错误：忘记关闭
+Scope scope = context.makeCurrent();
+doWork();
+// Scope 泄漏！
+```
+
+#### 19.6.2 避免在 Context 中存储大对象
+
+```java
+// ❌ 不好：存储大对象
+Context context = Context.current().with(LARGE_DATA_KEY, hugeObject);
+
+// ✅ 好：只存储引用或 ID
+Context context = Context.current().with(DATA_ID_KEY, "data-123");
+```
+
+#### 19.6.3 使用明确的 ContextKey 命名
+
+```java
+// ✅ 好：清晰的命名
+private static final ContextKey<String> USER_ID_KEY =
+    ContextKey.named("user.id");
+
+// ❌ 不好：模糊的命名
+private static final ContextKey<String> KEY =
+    ContextKey.named("k");
+```
+
+#### 19.6.4 在单元测试中启用严格模式
+
+```java
+// JUnit 5
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
+class MyTest {
+    @BeforeAll
+    void setUp() {
+        System.setProperty("io.opentelemetry.context.enableStrictContext", "true");
+    }
+}
+```
+
+### 19.7 性能考虑
+
+#### 19.7.1 Context 创建成本
+
+**Context 是轻量级的**:
+- 使用数组存储（ArrayBasedContext）
+- 写时复制（Copy-on-Write）
+- 共享不可变数据
+
+**基准测试结果**:
+```
+Context.current():              ~5 ns
+Context.with():                 ~20 ns
+Context.makeCurrent():          ~10 ns
+Scope.close():                  ~10 ns
+```
+
+#### 19.7.2 优化建议
+
+**1. 减少 Context 层级**:
+```java
+// ❌ 不好：多层嵌套
+Context c1 = Context.current().with(KEY1, val1);
+Context c2 = c1.with(KEY2, val2);
+Context c3 = c2.with(KEY3, val3);
+
+// ✅ 好：批量设置（如果可能）
+Context context = Context.current()
+    .with(KEY1, val1)
+    .with(KEY2, val2)
+    .with(KEY3, val3);
+```
+
+**2. 重用 Context**:
+```java
+// 如果 Context 不变，重用它
+private final Context baseContext = Context.root()
+    .with(SERVICE_NAME_KEY, "my-service");
+
+public void handleRequest() {
+    try (Scope scope = baseContext.makeCurrent()) {
+        // ...
+    }
+}
+```
+
+### 19.8 调试和故障排查
+
+#### 19.8.1 启用调试日志
+
+```bash
+java -Djava.util.logging.config.file=logging.properties \
+     -Dio.opentelemetry.context.enableStrictContext=true \
+     YourApp
+```
+
+**logging.properties**:
+```properties
+io.opentelemetry.context.level=FINE
+```
+
+#### 19.8.2 常见问题
+
+**问题 1: Context 丢失**
+
+```java
+// 原因：忘记 makeCurrent()
+Context context = Context.current().with(USER_ID_KEY, "12345");
+
+// ❌ 错误：没有使 Context 成为当前
+doWork();  // USER_ID_KEY.get() 返回 null
+
+// ✅ 正确
+try (Scope scope = context.makeCurrent()) {
+    doWork();  // USER_ID_KEY.get() 返回 "12345"
+}
+```
+
+**问题 2: 跨线程 Context 丢失**
+
+```java
+// ❌ 错误：ThreadLocal 不会自动传播
+new Thread(() -> {
+    assert USER_ID_KEY.get() == null;  // Context 丢失
+}).start();
+
+// ✅ 正确：手动传播
+Context context = Context.current();
+new Thread(() -> {
+    try (Scope scope = context.makeCurrent()) {
+        assert USER_ID_KEY.get() != null;  // Context 正确传播
+    }
+}).start();
+```
+
+**问题 3: Scope 泄漏**
+
+```java
+// ❌ 错误：异常导致 Scope 未关闭
+Scope scope = context.makeCurrent();
+doWork();  // 如果抛异常，scope.close() 不会执行
+scope.close();
+
+// ✅ 正确：使用 try-finally
+Scope scope = context.makeCurrent();
+try {
+    doWork();
+} finally {
+    scope.close();
+}
+
+// ✅ 更好：使用 try-with-resources
+try (Scope scope = context.makeCurrent()) {
+    doWork();
+}
+```
+
+---
+
+## 20. Semconv（语义约定）
+
+### 20.1 语义约定概述
+
+**Semantic Conventions（语义约定）** 定义了 OpenTelemetry 中标准的属性名称、度量名称和枚举值，确保不同语言实现和不同供应商之间的互操作性。
+
+**模块位置**: `api/incubator` (语义约定现在是 API 的一部分)
+
+**核心目标**:
+- ✅ 统一命名规范
+- ✅ 跨语言一致性
+- ✅ 后端兼容性
+- ✅ 可搜索性和可分析性
+
+### 20.2 语义约定分类
+
+#### 20.2.1 Resource 语义约定
+
+**服务相关**:
+```java
+import io.opentelemetry.semconv.ResourceAttributes;
+
+Resource resource = Resource.create(
+    Attributes.of(
+        // 服务名称（必需）
+        ResourceAttributes.SERVICE_NAME, "my-service",
+
+        // 服务版本
+        ResourceAttributes.SERVICE_VERSION, "1.0.0",
+
+        // 服务命名空间
+        ResourceAttributes.SERVICE_NAMESPACE, "production",
+
+        // 服务实例 ID
+        ResourceAttributes.SERVICE_INSTANCE_ID, "instance-123"
+    )
+);
+```
+
+**部署环境**:
+```java
+Attributes.of(
+    // 部署环境
+    ResourceAttributes.DEPLOYMENT_ENVIRONMENT, "production",
+
+    // 云提供商
+    ResourceAttributes.CLOUD_PROVIDER, "aws",
+
+    // 云区域
+    ResourceAttributes.CLOUD_REGION, "us-east-1",
+
+    // 云账户 ID
+    ResourceAttributes.CLOUD_ACCOUNT_ID, "123456789012"
+)
+```
+
+**主机信息**:
+```java
+Attributes.of(
+    // 主机名
+    ResourceAttributes.HOST_NAME, "server-01",
+
+    // 主机类型
+    ResourceAttributes.HOST_TYPE, "m5.large",
+
+    // 操作系统
+    ResourceAttributes.OS_TYPE, "linux",
+
+    // OS 版本
+    ResourceAttributes.OS_VERSION, "Ubuntu 20.04"
+)
+```
+
+**容器信息**:
+```java
+Attributes.of(
+    // 容器名称
+    ResourceAttributes.CONTAINER_NAME, "my-app",
+
+    // 容器 ID
+    ResourceAttributes.CONTAINER_ID, "abc123",
+
+    // 容器镜像名称
+    ResourceAttributes.CONTAINER_IMAGE_NAME, "my-app",
+
+    // 容器镜像标签
+    ResourceAttributes.CONTAINER_IMAGE_TAG, "v1.0.0"
+)
+```
+
+**Kubernetes 信息**:
+```java
+Attributes.of(
+    // K8s 集群名称
+    ResourceAttributes.K8S_CLUSTER_NAME, "prod-cluster",
+
+    // K8s 命名空间
+    ResourceAttributes.K8S_NAMESPACE_NAME, "default",
+
+    // K8s Pod 名称
+    ResourceAttributes.K8S_POD_NAME, "my-app-pod-123",
+
+    // K8s Deployment 名称
+    ResourceAttributes.K8S_DEPLOYMENT_NAME, "my-app"
+)
+```
+
+#### 20.2.2 Trace 语义约定
+
+**HTTP 客户端**:
+```java
+import io.opentelemetry.semconv.SemanticAttributes;
+
+Span span = tracer.spanBuilder("GET /users")
+    .setSpanKind(SpanKind.CLIENT)
+    .startSpan();
+
+span.setAttribute(SemanticAttributes.HTTP_METHOD, "GET");
+span.setAttribute(SemanticAttributes.HTTP_URL, "https://api.example.com/users");
+span.setAttribute(SemanticAttributes.HTTP_TARGET, "/users");
+span.setAttribute(SemanticAttributes.HTTP_SCHEME, "https");
+span.setAttribute(SemanticAttributes.HTTP_HOST, "api.example.com");
+span.setAttribute(SemanticAttributes.HTTP_STATUS_CODE, 200);
+span.setAttribute(SemanticAttributes.HTTP_REQUEST_CONTENT_LENGTH, 1024L);
+span.setAttribute(SemanticAttributes.HTTP_RESPONSE_CONTENT_LENGTH, 2048L);
+```
+
+**HTTP 服务端**:
+```java
+Span span = tracer.spanBuilder("GET /api/users")
+    .setSpanKind(SpanKind.SERVER)
+    .startSpan();
+
+span.setAttribute(SemanticAttributes.HTTP_METHOD, "GET");
+span.setAttribute(SemanticAttributes.HTTP_TARGET, "/api/users");
+span.setAttribute(SemanticAttributes.HTTP_ROUTE, "/api/users/:id");
+span.setAttribute(SemanticAttributes.HTTP_SCHEME, "https");
+span.setAttribute(SemanticAttributes.HTTP_STATUS_CODE, 200);
+span.setAttribute(SemanticAttributes.HTTP_CLIENT_IP, "192.168.1.1");
+span.setAttribute(SemanticAttributes.HTTP_USER_AGENT, "Mozilla/5.0...");
+```
+
+**数据库操作**:
+```java
+Span span = tracer.spanBuilder("SELECT users")
+    .setSpanKind(SpanKind.CLIENT)
+    .startSpan();
+
+span.setAttribute(SemanticAttributes.DB_SYSTEM, "postgresql");
+span.setAttribute(SemanticAttributes.DB_NAME, "mydb");
+span.setAttribute(SemanticAttributes.DB_USER, "dbuser");
+span.setAttribute(SemanticAttributes.DB_CONNECTION_STRING, "postgresql://localhost:5432/mydb");
+span.setAttribute(SemanticAttributes.DB_STATEMENT, "SELECT * FROM users WHERE id = ?");
+span.setAttribute(SemanticAttributes.DB_OPERATION, "SELECT");
+span.setAttribute(SemanticAttributes.DB_SQL_TABLE, "users");
+```
+
+**RPC 调用**:
+```java
+Span span = tracer.spanBuilder("grpc.UserService/GetUser")
+    .setSpanKind(SpanKind.CLIENT)
+    .startSpan();
+
+span.setAttribute(SemanticAttributes.RPC_SYSTEM, "grpc");
+span.setAttribute(SemanticAttributes.RPC_SERVICE, "UserService");
+span.setAttribute(SemanticAttributes.RPC_METHOD, "GetUser");
+span.setAttribute(SemanticAttributes.NET_PEER_NAME, "api.example.com");
+span.setAttribute(SemanticAttributes.NET_PEER_PORT, 50051);
+```
+
+**消息队列**:
+```java
+// 生产者
+Span span = tracer.spanBuilder("send user.created")
+    .setSpanKind(SpanKind.PRODUCER)
+    .startSpan();
+
+span.setAttribute(SemanticAttributes.MESSAGING_SYSTEM, "kafka");
+span.setAttribute(SemanticAttributes.MESSAGING_DESTINATION, "user.created");
+span.setAttribute(SemanticAttributes.MESSAGING_DESTINATION_KIND, "topic");
+span.setAttribute(SemanticAttributes.MESSAGING_MESSAGE_ID, "msg-123");
+span.setAttribute(SemanticAttributes.MESSAGING_KAFKA_PARTITION, 0);
+
+// 消费者
+Span span = tracer.spanBuilder("process user.created")
+    .setSpanKind(SpanKind.CONSUMER)
+    .startSpan();
+
+span.setAttribute(SemanticAttributes.MESSAGING_SYSTEM, "kafka");
+span.setAttribute(SemanticAttributes.MESSAGING_DESTINATION, "user.created");
+span.setAttribute(SemanticAttributes.MESSAGING_OPERATION, "process");
+span.setAttribute(SemanticAttributes.MESSAGING_CONSUMER_ID, "consumer-group-1");
+```
+
+#### 20.2.3 Metric 语义约定
+
+**HTTP 服务器指标**:
+```java
+// 请求持续时间
+DoubleHistogram requestDuration = meter.histogramBuilder("http.server.duration")
+    .setUnit("ms")
+    .setDescription("HTTP server request duration")
+    .build();
+
+requestDuration.record(123.45,
+    Attributes.of(
+        SemanticAttributes.HTTP_METHOD, "GET",
+        SemanticAttributes.HTTP_ROUTE, "/api/users",
+        SemanticAttributes.HTTP_STATUS_CODE, 200
+    )
+);
+
+// 活跃请求数
+LongUpDownCounter activeRequests = meter.upDownCounterBuilder("http.server.active_requests")
+    .setUnit("1")
+    .setDescription("Number of active HTTP requests")
+    .build();
+```
+
+**系统指标**:
+```java
+// CPU 使用率
+meter.gaugeBuilder("system.cpu.utilization")
+    .setUnit("1")
+    .setDescription("CPU utilization")
+    .buildWithCallback(measurement -> {
+        measurement.record(getCpuUsage(),
+            Attributes.of(
+                SemanticAttributes.CPU_STATE, "user"
+            )
+        );
+    });
+
+// 内存使用
+meter.gaugeBuilder("system.memory.usage")
+    .ofLongs()
+    .setUnit("bytes")
+    .setDescription("Memory usage")
+    .buildWithCallback(measurement -> {
+        measurement.record(getMemoryUsage(),
+            Attributes.of(
+                SemanticAttributes.MEMORY_STATE, "used"
+            )
+        );
+    });
+```
+
+### 20.3 命名规范
+
+#### 20.3.1 属性命名规则
+
+**规则**:
+1. 使用小写字母和点分隔符
+2. 使用命名空间（如 `http.`, `db.`, `net.`）
+3. 避免缩写（除非是通用的，如 `http`, `db`）
+4. 使用单数形式（除非语义上是复数）
+
+**示例**:
+```java
+// ✅ 好
+SemanticAttributes.HTTP_METHOD
+SemanticAttributes.DB_NAME
+SemanticAttributes.NET_PEER_NAME
+
+// ❌ 不好
+"httpMethod"  // 驼峰命名
+"database"    // 没有命名空间
+"net_peer"    // 下划线
+```
+
+#### 20.3.2 度量命名规则
+
+**规则**:
+1. 使用点分隔符
+2. 包含单位（如 `.duration`, `.size`）
+3. 使用复数形式（如 `.requests`, `.connections`）
+
+**示例**:
+```java
+// ✅ 好
+"http.server.duration"
+"system.cpu.utilization"
+"process.runtime.jvm.memory.used"
+
+// ❌ 不好
+"httpServerDuration"  // 驼峰命名
+"cpu"                 // 不够具体
+"requests"            // 缺少命名空间
+```
+
+### 20.4 使用建议
+
+#### 20.4.1 优先使用标准属性
+
+```java
+// ✅ 好：使用标准属性
+span.setAttribute(SemanticAttributes.HTTP_METHOD, "GET");
+span.setAttribute(SemanticAttributes.HTTP_STATUS_CODE, 200);
+
+// ❌ 不好：自定义属性名称
+span.setAttribute("method", "GET");
+span.setAttribute("status", 200);
+```
+
+#### 20.4.2 自定义属性使用命名空间
+
+```java
+// ✅ 好：使用自己的命名空间
+AttributeKey<String> CUSTOM_USER_TIER =
+    AttributeKey.stringKey("myapp.user.tier");
+
+span.setAttribute(CUSTOM_USER_TIER, "premium");
+
+// ❌ 不好：污染全局命名空间
+span.setAttribute("tier", "premium");
+```
+
+#### 20.4.3 保持属性一致性
+
+```java
+// ✅ 好：所有 HTTP 请求使用相同的属性
+void recordHttpRequest(Span span, HttpRequest request) {
+    span.setAttribute(SemanticAttributes.HTTP_METHOD, request.getMethod());
+    span.setAttribute(SemanticAttributes.HTTP_URL, request.getUrl());
+    span.setAttribute(SemanticAttributes.HTTP_STATUS_CODE, request.getStatusCode());
+}
+
+// ❌ 不好：不同地方使用不同属性
+span.setAttribute("method", "GET");  // 某处
+span.setAttribute(SemanticAttributes.HTTP_METHOD, "POST");  // 另一处
+```
+
+### 20.5 版本管理
+
+**语义约定版本**:
+- 语义约定独立版本控制
+- 向后兼容的变更：Minor 版本更新
+- 破坏性变更：Major 版本更新
+
+**检查当前版本**:
+```java
+// 语义约定版本通常在 ResourceAttributes 或 SemanticAttributes 类的注释中
+```
+
+### 20.6 参考资源
+
+**官方文档**:
+- OpenTelemetry 语义约定规范: https://opentelemetry.io/docs/specs/semconv/
+- HTTP 语义约定: https://opentelemetry.io/docs/specs/semconv/http/
+- 数据库语义约定: https://opentelemetry.io/docs/specs/semconv/database/
+- RPC 语义约定: https://opentelemetry.io/docs/specs/semconv/rpc/
+
+---
+
+## 21. 导出器详解
+
+### 21.1 导出器概述
+
+**导出器（Exporter）** 负责将遥测数据发送到后端系统。OpenTelemetry Java 提供了多种导出器实现，支持不同的协议和后端。
+
+**模块位置**: `exporters/`
+
+**导出器分类**:
+```
+exporters/
+├── otlp/                   # OTLP 协议（推荐）
+│   ├── all/                # 聚合所有 OTLP 导出器
+│   ├── common/             # OTLP 通用组件
+│   └── profiles/           # OTLP Profiles 支持
+├── zipkin/                 # Zipkin 格式
+├── prometheus/             # Prometheus 格式
+├── logging/                # 日志输出（调试）
+└── logging-otlp/           # OTLP 格式日志
+```
+
+### 21.2 OTLP 导出器详解
+
+#### 21.2.1 OTLP 协议概述
+
+**OTLP (OpenTelemetry Protocol)** 是 OpenTelemetry 的原生协议，具有以下特点：
+- ✅ 支持 gRPC 和 HTTP 传输
+- ✅ Protobuf 和 JSON 编码
+- ✅ 批量传输和压缩
+- ✅ 支持所有信号（Traces、Metrics、Logs）
+- ✅ 高性能和低开销
+
+**协议端点**:
+```
+gRPC:  http://localhost:4317
+HTTP:  http://localhost:4318
+  ├── /v1/traces
+  ├── /v1/metrics
+  └── /v1/logs
+```
+
+#### 21.2.2 OTLP gRPC 导出器
+
+**添加依赖**:
+```kotlin
+dependencies {
+    implementation("io.opentelemetry:opentelemetry-exporter-otlp")
+}
+```
+
+**配置 Traces 导出**:
+```java
+import io.opentelemetry.exporter.otlp.trace.OtlpGrpcSpanExporter;
+import io.opentelemetry.sdk.trace.export.SpanExporter;
+
+SpanExporter spanExporter = OtlpGrpcSpanExporter.builder()
+    .setEndpoint("http://localhost:4317")
+    .setTimeout(Duration.ofSeconds(10))
+    .setCompression("gzip")
+    .addHeader("api-key", "your-api-key")
+    .build();
+
+SdkTracerProvider tracerProvider = SdkTracerProvider.builder()
+    .addSpanProcessor(BatchSpanProcessor.builder(spanExporter).build())
+    .build();
+```
+
+**配置 Metrics 导出**:
+```java
+import io.opentelemetry.exporter.otlp.metrics.OtlpGrpcMetricExporter;
+import io.opentelemetry.sdk.metrics.export.MetricExporter;
+
+MetricExporter metricExporter = OtlpGrpcMetricExporter.builder()
+    .setEndpoint("http://localhost:4317")
+    .setTimeout(Duration.ofSeconds(10))
+    .build();
+
+SdkMeterProvider meterProvider = SdkMeterProvider.builder()
+    .registerMetricReader(
+        PeriodicMetricReader.builder(metricExporter)
+            .setInterval(Duration.ofSeconds(60))
+            .build()
+    )
+    .build();
+```
+
+**配置 Logs 导出**:
+```java
+import io.opentelemetry.exporter.otlp.logs.OtlpGrpcLogRecordExporter;
+import io.opentelemetry.sdk.logs.export.LogRecordExporter;
+
+LogRecordExporter logExporter = OtlpGrpcLogRecordExporter.builder()
+    .setEndpoint("http://localhost:4317")
+    .setTimeout(Duration.ofSeconds(10))
+    .build();
+
+SdkLoggerProvider loggerProvider = SdkLoggerProvider.builder()
+    .addLogRecordProcessor(
+        BatchLogRecordProcessor.builder(logExporter).build()
+    )
+    .build();
+```
+
+#### 21.2.3 OTLP HTTP 导出器
+
+**配置 HTTP 导出**:
+```java
+import io.opentelemetry.exporter.otlp.http.trace.OtlpHttpSpanExporter;
+
+SpanExporter spanExporter = OtlpHttpSpanExporter.builder()
+    .setEndpoint("http://localhost:4318/v1/traces")
+    .setTimeout(Duration.ofSeconds(10))
+    .setCompression("gzip")
+    .addHeader("Authorization", "Bearer token")
+    .build();
+```
+
+**HTTP vs gRPC 对比**:
+
+| 特性 | gRPC | HTTP |
+|------|------|------|
+| 性能 | 更高（二进制协议） | 较低（文本协议） |
+| 压缩 | 内置支持 | 需手动配置 |
+| 流式传输 | 支持 | 不支持 |
+| 防火墙友好 | 较差（非标准端口） | 更好（HTTP/HTTPS） |
+| 调试 | 较困难 | 更容易（可读格式） |
+
+**选择建议**:
+- **生产环境**: 优先使用 gRPC（高性能）
+- **防火墙限制**: 使用 HTTP
+- **调试**: 使用 HTTP + JSON 格式
+
+#### 21.2.4 OTLP 环境变量配置
+
+**通用配置**:
+```bash
+# OTLP 端点（gRPC 或 HTTP）
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+
+# 协议（grpc, http/protobuf, http/json）
+export OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+
+# 超时时间（毫秒）
+export OTEL_EXPORTER_OTLP_TIMEOUT=10000
+
+# 压缩（gzip, none）
+export OTEL_EXPORTER_OTLP_COMPRESSION=gzip
+
+# Headers
+export OTEL_EXPORTER_OTLP_HEADERS=api-key=your-key,other-header=value
+```
+
+**信号特定配置**:
+```bash
+# Traces 特定端点
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4318/v1/traces
+export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf
+export OTEL_EXPORTER_OTLP_TRACES_HEADERS=trace-api-key=key
+
+# Metrics 特定端点
+export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://localhost:4318/v1/metrics
+export OTEL_EXPORTER_OTLP_METRICS_PROTOCOL=http/protobuf
+
+# Logs 特定端点
+export OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://localhost:4318/v1/logs
+export OTEL_EXPORTER_OTLP_LOGS_PROTOCOL=http/protobuf
+```
+
+### 21.3 Zipkin 导出器
+
+#### 21.3.1 Zipkin 集成
+
+**添加依赖**:
+```kotlin
+dependencies {
+    implementation("io.opentelemetry:opentelemetry-exporter-zipkin")
+}
+```
+
+**配置 Zipkin 导出器**:
+```java
+import io.opentelemetry.exporter.zipkin.ZipkinSpanExporter;
+
+SpanExporter zipkinExporter = ZipkinSpanExporter.builder()
+    .setEndpoint("http://localhost:9411/api/v2/spans")
+    .setTimeout(Duration.ofSeconds(10))
+    .build();
+
+SdkTracerProvider tracerProvider = SdkTracerProvider.builder()
+    .addSpanProcessor(BatchSpanProcessor.builder(zipkinExporter).build())
+    .setResource(Resource.create(
+        Attributes.of(
+            ResourceAttributes.SERVICE_NAME, "my-service"
+        )
+    ))
+    .build();
+```
+
+**环境变量配置**:
+```bash
+export OTEL_TRACES_EXPORTER=zipkin
+export OTEL_EXPORTER_ZIPKIN_ENDPOINT=http://localhost:9411/api/v2/spans
+```
+
+#### 21.3.2 Zipkin 数据格式
+
+**Zipkin Span JSON 格式**:
+```json
+{
+  "traceId": "0af7651916cd43dd8448eb211c80319c",
+  "id": "b7ad6b7169203331",
+  "parentId": "a7ad6b7169203330",
+  "name": "GET /users",
+  "timestamp": 1704715200000000,
+  "duration": 150000,
+  "kind": "SERVER",
+  "localEndpoint": {
+    "serviceName": "my-service",
+    "ipv4": "192.168.1.1",
+    "port": 8080
+  },
+  "tags": {
+    "http.method": "GET",
+    "http.url": "/users",
+    "http.status_code": "200"
+  },
+  "annotations": [
+    {
+      "timestamp": 1704715200050000,
+      "value": "Processing started"
+    }
+  ]
+}
+```
+
+### 21.4 Prometheus 导出器
+
+#### 21.4.1 Prometheus 集成
+
+**添加依赖**:
+```kotlin
+dependencies {
+    implementation("io.opentelemetry:opentelemetry-exporter-prometheus")
+}
+```
+
+**配置 Prometheus HTTP Server**:
+```java
+import io.opentelemetry.exporter.prometheus.PrometheusHttpServer;
+
+PrometheusHttpServer prometheusServer = PrometheusHttpServer.builder()
+    .setHost("localhost")
+    .setPort(9464)
+    .build();
+
+SdkMeterProvider meterProvider = SdkMeterProvider.builder()
+    .registerMetricReader(prometheusServer)
+    .build();
+
+// Prometheus 抓取端点: http://localhost:9464/metrics
+```
+
+**创建指标**:
+```java
+Meter meter = meterProvider.get("my-service");
+
+LongCounter requestCounter = meter.counterBuilder("http_requests_total")
+    .setDescription("Total HTTP requests")
+    .setUnit("1")
+    .build();
+
+requestCounter.add(1,
+    Attributes.of(
+        AttributeKey.stringKey("method"), "GET",
+        AttributeKey.stringKey("endpoint"), "/api/users",
+        AttributeKey.stringKey("status"), "200"
+    )
+);
+```
+
+#### 21.4.2 Prometheus 指标格式
+
+**访问 http://localhost:9464/metrics**:
+```
+# HELP http_requests_total Total HTTP requests
+# TYPE http_requests_total counter
+http_requests_total{method="GET",endpoint="/api/users",status="200"} 100.0
+
+# HELP http_response_time_seconds HTTP response time
+# TYPE http_response_time_seconds histogram
+http_response_time_seconds_bucket{endpoint="/api/users",le="0.01"} 50.0
+http_response_time_seconds_bucket{endpoint="/api/users",le="0.05"} 80.0
+http_response_time_seconds_bucket{endpoint="/api/users",le="0.1"} 95.0
+http_response_time_seconds_bucket{endpoint="/api/users",le="+Inf"} 100.0
+http_response_time_seconds_sum{endpoint="/api/users"} 3.5
+http_response_time_seconds_count{endpoint="/api/users"} 100.0
+
+# HELP system_memory_usage_bytes Memory usage
+# TYPE system_memory_usage_bytes gauge
+system_memory_usage_bytes{state="used"} 1.073741824E9
+```
+
+### 21.5 Logging 导出器（调试）
+
+#### 21.5.1 配置日志导出器
+
+**Traces**:
+```java
+import io.opentelemetry.exporter.logging.LoggingSpanExporter;
+
+SpanExporter loggingExporter = LoggingSpanExporter.create();
+
+SdkTracerProvider tracerProvider = SdkTracerProvider.builder()
+    .addSpanProcessor(SimpleSpanProcessor.create(loggingExporter))
+    .build();
+```
+
+**Metrics**:
+```java
+import io.opentelemetry.exporter.logging.LoggingMetricExporter;
+
+MetricExporter loggingExporter = LoggingMetricExporter.create();
+
+SdkMeterProvider meterProvider = SdkMeterProvider.builder()
+    .registerMetricReader(
+        PeriodicMetricReader.builder(loggingExporter)
+            .setInterval(Duration.ofSeconds(60))
+            .build()
+    )
+    .build();
+```
+
+**Logs**:
+```java
+import io.opentelemetry.exporter.logging.LoggingLogRecordExporter;
+
+LogRecordExporter loggingExporter = LoggingLogRecordExporter.create();
+
+SdkLoggerProvider loggerProvider = SdkLoggerProvider.builder()
+    .addLogRecordProcessor(SimpleLogRecordProcessor.create(loggingExporter))
+    .build();
+```
+
+#### 21.5.2 OTLP 格式日志导出
+
+**输出 OTLP JSON 格式（调试）**:
+```java
+import io.opentelemetry.exporter.logging.otlp.OtlpJsonLoggingSpanExporter;
+import io.opentelemetry.exporter.logging.otlp.OtlpJsonLoggingMetricExporter;
+import io.opentelemetry.exporter.logging.otlp.OtlpJsonLoggingLogRecordExporter;
+
+// Traces
+SpanExporter otlpLoggingExporter = OtlpJsonLoggingSpanExporter.create();
+
+// Metrics
+MetricExporter otlpMetricLoggingExporter = OtlpJsonLoggingMetricExporter.create();
+
+// Logs
+LogRecordExporter otlpLogLoggingExporter = OtlpJsonLoggingLogRecordExporter.create();
+```
+
+**输出示例**（OTLP JSON 格式）:
+```json
+{
+  "resourceSpans": [{
+    "resource": {
+      "attributes": [{
+        "key": "service.name",
+        "value": { "stringValue": "my-service" }
+      }]
+    },
+    "scopeSpans": [{
+      "spans": [{
+        "traceId": "0af7651916cd43dd8448eb211c80319c",
+        "spanId": "b7ad6b7169203331",
+        "name": "GET /users",
+        "kind": "SPAN_KIND_SERVER",
+        "startTimeUnixNano": "1704715200000000000",
+        "endTimeUnixNano": "1704715200150000000",
+        "attributes": [{
+          "key": "http.method",
+          "value": { "stringValue": "GET" }
+        }]
+      }]
+    }]
+  }]
+}
+```
+
+### 21.6 多导出器配置
+
+#### 21.6.1 同时导出到多个后端
+
+```java
+// 创建多个导出器
+SpanExporter otlpExporter = OtlpGrpcSpanExporter.builder()
+    .setEndpoint("http://localhost:4317")
+    .build();
+
+SpanExporter zipkinExporter = ZipkinSpanExporter.builder()
+    .setEndpoint("http://localhost:9411/api/v2/spans")
+    .build();
+
+SpanExporter loggingExporter = LoggingSpanExporter.create();
+
+// 添加多个 SpanProcessor
+SdkTracerProvider tracerProvider = SdkTracerProvider.builder()
+    .addSpanProcessor(BatchSpanProcessor.builder(otlpExporter).build())
+    .addSpanProcessor(BatchSpanProcessor.builder(zipkinExporter).build())
+    .addSpanProcessor(SimpleSpanProcessor.create(loggingExporter))
+    .build();
+```
+
+#### 21.6.2 使用 MultiSpanExporter
+
+```java
+import io.opentelemetry.sdk.trace.export.SpanExporter;
+import java.util.Arrays;
+
+// 包装多个导出器
+SpanExporter multiExporter = SpanExporter.composite(
+    Arrays.asList(otlpExporter, zipkinExporter, loggingExporter)
+);
+
+SdkTracerProvider tracerProvider = SdkTracerProvider.builder()
+    .addSpanProcessor(BatchSpanProcessor.builder(multiExporter).build())
+    .build();
+```
+
+### 21.7 导出器性能优化
+
+#### 21.7.1 批处理配置
+
+```java
+BatchSpanProcessor processor = BatchSpanProcessor.builder(exporter)
+    .setScheduleDelay(Duration.ofSeconds(5))      // 批处理延迟
+    .setMaxQueueSize(2048)                        // 队列大小
+    .setMaxExportBatchSize(512)                   // 批大小
+    .setExporterTimeout(Duration.ofSeconds(30))   // 导出超时
+    .build();
+```
+
+**参数调优建议**:
+
+| 参数 | 默认值 | 低吞吐量 | 高吞吐量 | 低延迟 |
+|------|--------|----------|----------|--------|
+| scheduleDelay | 5s | 10s | 1s | 500ms |
+| maxQueueSize | 2048 | 512 | 8192 | 2048 |
+| maxExportBatchSize | 512 | 128 | 2048 | 256 |
+| exporterTimeout | 30s | 30s | 60s | 10s |
+
+#### 21.7.2 压缩配置
+
+```java
+// 启用 gzip 压缩（推荐）
+OtlpGrpcSpanExporter.builder()
+    .setCompression("gzip")
+    .build();
+
+// 压缩效果：减少 70-90% 的网络传输
+```
+
+#### 21.7.3 连接池配置
+
+**gRPC 连接管理**:
+```java
+// gRPC 自动管理连接池
+// 默认配置已经足够好，通常不需要手动配置
+```
+
+### 21.8 故障排查
+
+#### 21.8.1 导出失败诊断
+
+**启用详细日志**:
+```bash
+java -Djava.util.logging.config.file=logging.properties YourApp
+```
+
+**logging.properties**:
+```properties
+io.opentelemetry.exporter.level=FINE
+io.opentelemetry.sdk.trace.export.level=FINE
+```
+
+**常见问题**:
+
+**问题 1: 连接被拒绝**
+```
+Error: Connection refused: localhost/127.0.0.1:4317
+```
+**解决**: 检查 Collector 是否运行，端口是否正确
+
+**问题 2: 超时**
+```
+Error: DEADLINE_EXCEEDED: deadline exceeded after 10s
+```
+**解决**: 增加超时时间或检查网络延迟
+
+**问题 3: 认证失败**
+```
+Error: UNAUTHENTICATED: invalid authentication credentials
+```
+**解决**: 检查 API Key 或 Token 配置
+
+#### 21.8.2 性能问题诊断
+
+**检查队列大小**:
+```java
+// 自定义 SpanProcessor 监控队列
+public class MonitoredBatchSpanProcessor implements SpanProcessor {
+    private final BatchSpanProcessor delegate;
+
+    @Override
+    public void onEnd(ReadableSpan span) {
+        delegate.onEnd(span);
+        // 监控队列大小
+        System.out.println("Queue size: " + getCurrentQueueSize());
+    }
+}
+```
+
+**检查导出延迟**:
+```java
+SpanExporter instrumentedExporter = new SpanExporter() {
+    private final SpanExporter delegate = otlpExporter;
+
+    @Override
+    public CompletableResultCode export(Collection<SpanData> spans) {
+        long start = System.currentTimeMillis();
+        CompletableResultCode result = delegate.export(spans);
+        result.whenComplete(() -> {
+            long duration = System.currentTimeMillis() - start;
+            System.out.println("Export took " + duration + "ms for " + spans.size() + " spans");
+        });
+        return result;
+    }
+};
+```
+
+### 21.9 最佳实践
+
+#### 21.9.1 生产环境推荐配置
+
+```java
+// 推荐：使用 OTLP + gRPC + 批处理
+SpanExporter exporter = OtlpGrpcSpanExporter.builder()
+    .setEndpoint("http://collector:4317")
+    .setTimeout(Duration.ofSeconds(30))
+    .setCompression("gzip")
+    .build();
+
+SpanProcessor processor = BatchSpanProcessor.builder(exporter)
+    .setScheduleDelay(Duration.ofSeconds(5))
+    .setMaxQueueSize(2048)
+    .setMaxExportBatchSize(512)
+    .build();
+
+SdkTracerProvider tracerProvider = SdkTracerProvider.builder()
+    .addSpanProcessor(processor)
+    .setResource(Resource.create(
+        Attributes.of(
+            ResourceAttributes.SERVICE_NAME, "my-service",
+            ResourceAttributes.SERVICE_VERSION, "1.0.0",
+            ResourceAttributes.DEPLOYMENT_ENVIRONMENT, "production"
+        )
+    ))
+    .build();
+```
+
+#### 21.9.2 开发环境推荐配置
+
+```java
+// 开发：使用 Logging 导出器 + OTLP JSON 格式
+SpanExporter loggingExporter = OtlpJsonLoggingSpanExporter.create();
+
+SdkTracerProvider tracerProvider = SdkTracerProvider.builder()
+    .addSpanProcessor(SimpleSpanProcessor.create(loggingExporter))
+    .build();
+```
+
+#### 21.9.3 混合环境配置
+
+```java
+// 生产：OTLP + 日志（错误时）
+SpanExporter otlpExporter = OtlpGrpcSpanExporter.builder()
+    .setEndpoint("http://collector:4317")
+    .build();
+
+SpanExporter loggingExporter = LoggingSpanExporter.create();
+
+// 正常：导出到 OTLP
+// 错误：额外导出到日志
+SpanProcessor processor = new ConditionalSpanProcessor(
+    BatchSpanProcessor.builder(otlpExporter).build(),
+    SimpleSpanProcessor.create(loggingExporter)
+);
+```
+
+---
+
+**相关章节**:
+- ← 上一节: [10. 导出器架构](#10-导出器架构)
+- → 下一节: [22. 扩展模块](#22-扩展模块)
 - ↑ 返回目录: [目录](#📑-目录)
 
 ---

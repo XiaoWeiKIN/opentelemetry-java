@@ -1928,6 +1928,2582 @@ try {
 
 ---
 
+## 核心组件
+
+本章节详细介绍 autoconfigure 模块的核心组件，包括核心配置类、组件工厂类和辅助类。这些类共同实现了基于环境变量和系统属性的 SDK 自动配置功能。
+
+### 组件架构概览
+
+autoconfigure 模块的核心组件分为 3 大类：
+
+```
+AutoConfigure 模块架构
+├── 核心配置类（6 个）
+│   ├── AutoConfiguredOpenTelemetrySdk          # 入口和包装器
+│   ├── AutoConfiguredOpenTelemetrySdkBuilder   # 主构建器
+│   ├── ResourceConfiguration                   # Resource 配置
+│   ├── TracerProviderConfiguration             # TracerProvider 配置
+│   ├── MeterProviderConfiguration              # MeterProvider 配置
+│   └── LoggerProviderConfiguration             # LoggerProvider 配置
+│
+├── 组件工厂类（4 个）
+│   ├── SpanExporterConfiguration               # Span 导出器工厂
+│   ├── MetricExporterConfiguration             # Metric 导出器/读取器工厂
+│   ├── LogRecordExporterConfiguration          # 日志导出器工厂
+│   └── PropagatorConfiguration                 # 传播器工厂
+│
+└── 辅助类（6 个）
+    ├── SpiHelper                                # SPI 加载管理
+    ├── NamedSpiManager                          # 命名 SPI 延迟加载
+    ├── ComponentLoader                          # 组件类加载器
+    ├── AutoConfigureUtil                        # 配置工具类
+    ├── IncubatingUtil                           # 实验性功能工具
+    └── EnvironmentResourceProvider              # 环境资源检测
+```
+
+### 1. 核心配置类
+
+核心配置类负责整体配置流程和 SDK 组件构建。
+
+#### 1.1 AutoConfiguredOpenTelemetrySdk
+
+**包路径**: `io.opentelemetry.sdk.autoconfigure.AutoConfiguredOpenTelemetrySdk`
+
+**职责**: 不可变包装器，持有配置后的 OpenTelemetrySdk 实例及相关配置信息。
+
+**关键方法**:
+
+```java
+public final class AutoConfiguredOpenTelemetrySdk {
+    // 静态工厂方法：最简单的初始化方式
+    public static AutoConfiguredOpenTelemetrySdk initialize() {
+        return builder().build();
+    }
+
+    // 获取构建器
+    public static AutoConfiguredOpenTelemetrySdkBuilder builder() {
+        return new AutoConfiguredOpenTelemetrySdkBuilder();
+    }
+
+    // 获取配置后的 SDK 实例
+    public OpenTelemetrySdk getOpenTelemetrySdk() {
+        return openTelemetrySdk;
+    }
+
+    // 获取 Resource 配置
+    public Resource getResource() {
+        return resource;
+    }
+
+    // 获取配置属性
+    public ConfigProperties getConfig() {
+        return config;
+    }
+
+    // 创建包装器（内部使用）
+    static AutoConfiguredOpenTelemetrySdk create(
+        OpenTelemetrySdk openTelemetrySdk,
+        Resource resource,
+        ConfigProperties config) {
+        return new AutoConfiguredOpenTelemetrySdk(openTelemetrySdk, resource, config);
+    }
+}
+```
+
+**使用示例**:
+
+```java
+// 方式 1: 最简单的初始化
+OpenTelemetrySdk sdk = AutoConfiguredOpenTelemetrySdk.initialize()
+    .getOpenTelemetrySdk();
+
+// 方式 2: 获取额外信息
+AutoConfiguredOpenTelemetrySdk autoConfigured =
+    AutoConfiguredOpenTelemetrySdk.initialize();
+
+OpenTelemetrySdk sdk = autoConfigured.getOpenTelemetrySdk();
+Resource resource = autoConfigured.getResource();
+ConfigProperties config = autoConfigured.getConfig();
+
+// 查看配置的服务名称
+String serviceName = resource.getAttribute(AttributeKey.stringKey("service.name"));
+System.out.println("Service name: " + serviceName);
+```
+
+**生命周期管理**:
+
+- `AutoConfiguredOpenTelemetrySdk` 是不可变对象，通常作为应用程序级单例使用
+- 内部的 `OpenTelemetrySdk` 会注册 JVM 关闭钩子，自动清理资源
+- 如果需要手动控制生命周期，使用 `disableShutdownHook()` 并手动调用 `close()`
+
+#### 1.2 AutoConfiguredOpenTelemetrySdkBuilder
+
+**包路径**: `io.opentelemetry.sdk.autoconfigure.AutoConfiguredOpenTelemetrySdkBuilder`
+
+**职责**: 主构建器，提供 14+ 定制方法，实现所有配置逻辑。
+
+**核心方法**: `buildImpl()` - 所有配置逻辑的入口点（详见前面章节的源码解析）
+
+**定制器方法详解**:
+
+##### 1.2.1 Resource 相关定制器
+
+```java
+// 定制 Resource 属性
+public AutoConfiguredOpenTelemetrySdkBuilder addResourceCustomizer(
+    BiFunction<? super Resource, ConfigProperties, ? extends Resource> resourceCustomizer)
+```
+
+**使用场景**: 添加或修改 Resource 属性（服务信息、部署环境等）
+
+**示例**:
+```java
+AutoConfiguredOpenTelemetrySdk.builder()
+    .addResourceCustomizer((resource, config) ->
+        resource.toBuilder()
+            .put("deployment.environment", "production")
+            .put("service.namespace", "my-company")
+            .put("service.version", "1.2.3")
+            .build())
+    .build();
+```
+
+##### 1.2.2 Propagator 相关定制器
+
+```java
+// 定制传播器
+public AutoConfiguredOpenTelemetrySdkBuilder addPropagatorCustomizer(
+    BiFunction<? super TextMapPropagator, ConfigProperties, ? extends TextMapPropagator> propagatorCustomizer)
+```
+
+**使用场景**: 修改或包装传播器
+
+**示例**:
+```java
+AutoConfiguredOpenTelemetrySdk.builder()
+    .addPropagatorCustomizer((propagator, config) ->
+        // 添加日志记录
+        new LoggingPropagator(propagator))
+    .build();
+```
+
+##### 1.2.3 Sampler 相关定制器
+
+```java
+// 定制采样器
+public AutoConfiguredOpenTelemetrySdkBuilder addSamplerCustomizer(
+    BiFunction<? super Sampler, ConfigProperties, ? extends Sampler> samplerCustomizer)
+```
+
+**使用场景**: 修改采样决策逻辑
+
+**示例**:
+```java
+AutoConfiguredOpenTelemetrySdk.builder()
+    .addSamplerCustomizer((sampler, config) ->
+        // 包装原采样器，添加额外逻辑
+        new ConditionalSampler(sampler))
+    .build();
+```
+
+##### 1.2.4 Span 导出器相关定制器
+
+```java
+// 定制 Span 导出器
+public AutoConfiguredOpenTelemetrySdkBuilder addSpanExporterCustomizer(
+    BiFunction<? super SpanExporter, ConfigProperties, ? extends SpanExporter> exporterCustomizer)
+```
+
+**使用场景**: 包装导出器，添加日志、监控、过滤等逻辑
+
+**示例**:
+```java
+AutoConfiguredOpenTelemetrySdk.builder()
+    .addSpanExporterCustomizer((exporter, config) ->
+        new LoggingSpanExporter(exporter) {
+            @Override
+            public CompletableResultCode export(Collection<SpanData> spans) {
+                logger.info("Exporting {} spans", spans.size());
+                return super.export(spans);
+            }
+        })
+    .build();
+```
+
+##### 1.2.5 Span 处理器相关定制器
+
+```java
+// 定制 Span 处理器
+public AutoConfiguredOpenTelemetrySdkBuilder addSpanProcessorCustomizer(
+    BiFunction<? super SpanProcessor, ConfigProperties, ? extends SpanProcessor> processorCustomizer)
+```
+
+**使用场景**: 过滤 Span、添加属性、修改处理逻辑
+
+**示例**:
+```java
+AutoConfiguredOpenTelemetrySdk.builder()
+    .addSpanProcessorCustomizer((processor, config) ->
+        new FilteringSpanProcessor(processor) {
+            @Override
+            public void onEnd(ReadableSpan span) {
+                // 过滤掉内部 Span
+                if (!span.getName().startsWith("internal.")) {
+                    super.onEnd(span);
+                }
+            }
+        })
+    .build();
+```
+
+##### 1.2.6 TracerProvider 相关定制器
+
+```java
+// 定制 TracerProvider Builder
+public AutoConfiguredOpenTelemetrySdkBuilder addTracerProviderCustomizer(
+    BiFunction<SdkTracerProviderBuilder, ConfigProperties, SdkTracerProviderBuilder> tracerProviderCustomizer)
+```
+
+**使用场景**: 直接修改 TracerProvider Builder
+
+**示例**:
+```java
+AutoConfiguredOpenTelemetrySdk.builder()
+    .addTracerProviderCustomizer((builder, config) ->
+        builder.setSampler(Sampler.alwaysOn())
+               .setSpanLimits(SpanLimits.builder()
+                   .setMaxNumberOfAttributes(64)
+                   .build()))
+    .build();
+```
+
+##### 1.2.7 Metric 导出器相关定制器
+
+```java
+// 定制 Metric 导出器
+public AutoConfiguredOpenTelemetrySdkBuilder addMetricExporterCustomizer(
+    BiFunction<? super MetricExporter, ConfigProperties, ? extends MetricExporter> exporterCustomizer)
+```
+
+**使用场景**: 包装 Metric 导出器
+
+##### 1.2.8 Metric 读取器相关定制器
+
+```java
+// 定制 Metric 读取器
+public AutoConfiguredOpenTelemetrySdkBuilder addMetricReaderCustomizer(
+    BiFunction<? super MetricReader, ConfigProperties, ? extends MetricReader> readerCustomizer)
+```
+
+**使用场景**: 修改 Metric 读取器配置
+
+##### 1.2.9 MeterProvider 相关定制器
+
+```java
+// 定制 MeterProvider Builder
+public AutoConfiguredOpenTelemetrySdkBuilder addMeterProviderCustomizer(
+    BiFunction<SdkMeterProviderBuilder, ConfigProperties, SdkMeterProviderBuilder> meterProviderCustomizer)
+```
+
+**使用场景**: 直接修改 MeterProvider Builder
+
+**示例**:
+```java
+AutoConfiguredOpenTelemetrySdk.builder()
+    .addMeterProviderCustomizer((builder, config) ->
+        builder.registerView(
+            InstrumentSelector.builder()
+                .setType(InstrumentType.HISTOGRAM)
+                .build(),
+            View.builder()
+                .setAggregation(Aggregation.explicitBucketHistogram(
+                    Arrays.asList(0.1, 0.5, 1.0, 5.0, 10.0)))
+                .build()))
+    .build();
+```
+
+##### 1.2.10 日志导出器相关定制器
+
+```java
+// 定制日志导出器
+public AutoConfiguredOpenTelemetrySdkBuilder addLogRecordExporterCustomizer(
+    BiFunction<? super LogRecordExporter, ConfigProperties, ? extends LogRecordExporter> exporterCustomizer)
+```
+
+**使用场景**: 包装日志导出器
+
+##### 1.2.11 日志处理器相关定制器
+
+```java
+// 定制日志处理器
+public AutoConfiguredOpenTelemetrySdkBuilder addLogRecordProcessorCustomizer(
+    BiFunction<? super LogRecordProcessor, ConfigProperties, ? extends LogRecordProcessor> processorCustomizer)
+```
+
+**使用场景**: 过滤日志记录
+
+##### 1.2.12 LoggerProvider 相关定制器
+
+```java
+// 定制 LoggerProvider Builder
+public AutoConfiguredOpenTelemetrySdkBuilder addLoggerProviderCustomizer(
+    BiFunction<SdkLoggerProviderBuilder, ConfigProperties, SdkLoggerProviderBuilder> loggerProviderCustomizer)
+```
+
+**使用场景**: 直接修改 LoggerProvider Builder
+
+##### 1.2.13 配置属性供应器
+
+```java
+// 添加默认配置属性
+public AutoConfiguredOpenTelemetrySdkBuilder addPropertiesSupplier(
+    Supplier<Map<String, String>> propertiesSupplier)
+```
+
+**使用场景**: 提供默认配置值（优先级低于环境变量）
+
+**示例**:
+```java
+Map<String, String> defaults = new HashMap<>();
+defaults.put("otel.service.name", "my-service");
+defaults.put("otel.traces.sampler", "parentbased_traceidratio");
+defaults.put("otel.traces.sampler.arg", "0.1");
+
+AutoConfiguredOpenTelemetrySdk.builder()
+    .addPropertiesSupplier(() -> defaults)
+    .build();
+```
+
+##### 1.2.14 配置属性定制器
+
+```java
+// 定制配置属性
+public AutoConfiguredOpenTelemetrySdkBuilder addPropertiesCustomizer(
+    Function<ConfigProperties, Map<String, String>> propertiesCustomizer)
+```
+
+**使用场景**: 动态修改或覆盖配置属性
+
+**示例**:
+```java
+AutoConfiguredOpenTelemetrySdk.builder()
+    .addPropertiesCustomizer(props -> {
+        Map<String, String> overrides = new HashMap<>();
+        // 根据条件覆盖配置
+        if (isProduction()) {
+            overrides.put("otel.traces.sampler", "traceidratio");
+            overrides.put("otel.traces.sampler.arg", "0.01");
+        }
+        return overrides;
+    })
+    .build();
+```
+
+**定制器执行顺序**:
+
+```
+buildImpl() 执行流程
+├── 1. 声明式配置尝试
+├── 2. SPI 和定制器初始化
+├── 3. 配置属性加载
+│   ├── 应用 propertiesSupplier
+│   └── 应用 propertiesCustomizer
+├── 4. 配置 Resource
+│   └── 应用 resourceCustomizer
+├── 5. 配置 SDK 组件
+│   ├── 配置 Propagators → 应用 propagatorCustomizer
+│   ├── 配置 MeterProvider
+│   │   ├── 应用 metricExporterCustomizer
+│   │   ├── 应用 metricReaderCustomizer
+│   │   └── 应用 meterProviderCustomizer
+│   ├── 配置 TracerProvider
+│   │   ├── 应用 samplerCustomizer
+│   │   ├── 应用 spanExporterCustomizer
+│   │   ├── 应用 spanProcessorCustomizer
+│   │   └── 应用 tracerProviderCustomizer
+│   └── 配置 LoggerProvider
+│       ├── 应用 logRecordExporterCustomizer
+│       ├── 应用 logRecordProcessorCustomizer
+│       └── 应用 loggerProviderCustomizer
+└── 6. 构建并返回 SDK
+```
+
+#### 1.3 ResourceConfiguration
+
+**包路径**: `io.opentelemetry.sdk.autoconfigure.internal.ResourceConfiguration`
+
+**职责**: 配置 Resource（服务元数据），包括加载 ResourceProvider SPI、合并 Resource、应用定制器。
+
+**核心方法**:
+
+```java
+final class ResourceConfiguration {
+    /**
+     * 配置 Resource
+     *
+     * @param config 配置属性
+     * @param spiHelper SPI 助手
+     * @param resourceCustomizer Resource 定制器
+     * @return 配置后的 Resource
+     */
+    static Resource configureResource(
+        ConfigProperties config,
+        SpiHelper spiHelper,
+        BiFunction<? super Resource, ConfigProperties, ? extends Resource> resourceCustomizer) {
+
+        // 1. 从环境变量创建 Resource
+        Resource result = Resource.getDefault();
+
+        // 2. 加载所有 ResourceProvider SPI（按 order() 排序）
+        for (ResourceProvider resourceProvider : spiHelper.loadOrdered(ResourceProvider.class)) {
+            Resource providerResource = resourceProvider.createResource(config);
+            result = result.merge(providerResource);
+        }
+
+        // 3. 从 OTEL_RESOURCE_ATTRIBUTES 读取属性
+        String resourceAttributes = config.getString("otel.resource.attributes");
+        if (resourceAttributes != null) {
+            result = result.merge(parseResourceAttributes(resourceAttributes));
+        }
+
+        // 4. 应用定制器
+        result = resourceCustomizer.apply(result, config);
+
+        return result;
+    }
+}
+```
+
+**配置流程**:
+
+```
+configureResource()
+│
+├── 1. Resource.getDefault()
+│   └── 返回 SDK 默认 Resource（包含 SDK 版本等）
+│
+├── 2. 加载 ResourceProvider SPI
+│   ├── OsResourceProvider (操作系统)
+│   ├── ProcessResourceProvider (进程 PID)
+│   ├── ProcessRuntimeResourceProvider (Java 运行时)
+│   ├── HostResourceProvider (主机名)
+│   ├── ContainerResourceProvider (容器 ID)
+│   └── 自定义 ResourceProvider
+│
+├── 3. 解析 OTEL_RESOURCE_ATTRIBUTES
+│   └── 格式: key1=val1,key2=val2
+│
+├── 4. 应用 resourceCustomizer
+│   └── 用户自定义逻辑
+│
+└── 5. 返回最终 Resource
+```
+
+**相关环境变量**:
+
+| 环境变量 | 说明 | 示例 |
+|---------|------|------|
+| `OTEL_SERVICE_NAME` | 服务名称 | `my-service` |
+| `OTEL_RESOURCE_ATTRIBUTES` | Resource 属性（逗号分隔） | `environment=prod,region=us-west` |
+| `OTEL_JAVA_ENABLED_RESOURCE_PROVIDERS` | 启用的 ResourceProvider 类名 | `com.example.MyResourceProvider` |
+| `OTEL_JAVA_DISABLED_RESOURCE_PROVIDERS` | 禁用的 ResourceProvider 类名 | `io.opentelemetry.sdk.extension.resources.HostResourceProvider` |
+
+**Resource 合并规则**:
+
+- 后加载的 Resource 会覆盖前面的同名属性
+- `ResourceProvider` 按 `order()` 值从小到大执行
+- `OTEL_RESOURCE_ATTRIBUTES` 在所有 ResourceProvider 之后应用
+- `resourceCustomizer` 最后执行，优先级最高
+
+**示例 Resource**:
+
+```json
+{
+  "service.name": "my-service",
+  "service.version": "1.0.0",
+  "deployment.environment": "production",
+  "host.name": "server-01",
+  "host.arch": "amd64",
+  "os.type": "linux",
+  "os.description": "Linux 5.10.0",
+  "process.pid": "12345",
+  "process.runtime.name": "OpenJDK Runtime Environment",
+  "process.runtime.version": "17.0.1",
+  "telemetry.sdk.name": "opentelemetry",
+  "telemetry.sdk.language": "java",
+  "telemetry.sdk.version": "1.35.0"
+}
+```
+
+#### 1.4 TracerProviderConfiguration
+
+**包路径**: `io.opentelemetry.sdk.autoconfigure.internal.TracerProviderConfiguration`
+
+**职责**: 配置 TracerProvider（Traces 信号），包括采样器、导出器、处理器。
+
+**核心方法**:
+
+```java
+final class TracerProviderConfiguration {
+    /**
+     * 配置 TracerProvider
+     */
+    static void configureTracerProvider(
+        SdkTracerProviderBuilder tracerProviderBuilder,
+        ConfigProperties config,
+        SpiHelper spiHelper,
+        MeterProvider meterProvider,
+        BiFunction<? super SpanExporter, ConfigProperties, ? extends SpanExporter> exporterCustomizer,
+        BiFunction<? super SpanProcessor, ConfigProperties, ? extends SpanProcessor> processorCustomizer,
+        BiFunction<? super Sampler, ConfigProperties, ? extends Sampler> samplerCustomizer,
+        List<Closeable> closeables) {
+
+        // 1. 配置采样器
+        Sampler sampler = configureSampler(config, spiHelper);
+        sampler = samplerCustomizer.apply(sampler, config);
+        tracerProviderBuilder.setSampler(sampler);
+
+        // 2. 配置 Span 限制
+        SpanLimits spanLimits = configureSpanLimits(config);
+        tracerProviderBuilder.setSpanLimits(spanLimits);
+
+        // 3. 配置 Span 导出器
+        List<SpanExporter> exporters = SpanExporterConfiguration.configureSpanExporters(
+            config, spiHelper, meterProvider, closeables);
+
+        for (SpanExporter exporter : exporters) {
+            exporter = exporterCustomizer.apply(exporter, config);
+
+            // 4. 创建批处理器
+            SpanProcessor processor = configureBatchSpanProcessor(config, exporter, meterProvider);
+            processor = processorCustomizer.apply(processor, config);
+
+            tracerProviderBuilder.addSpanProcessor(processor);
+            closeables.add(processor);
+        }
+    }
+}
+```
+
+**配置流程**:
+
+```
+configureTracerProvider()
+│
+├── 1. 配置采样器
+│   ├── 读取 OTEL_TRACES_SAMPLER
+│   ├── 加载 ConfigurableSamplerProvider SPI
+│   ├── 应用 samplerCustomizer
+│   └── 默认: parentbased_always_on
+│
+├── 2. 配置 Span 限制
+│   ├── OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT
+│   ├── OTEL_SPAN_EVENT_COUNT_LIMIT
+│   ├── OTEL_SPAN_LINK_COUNT_LIMIT
+│   └── OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT
+│
+├── 3. 配置 Span 导出器
+│   ├── 读取 OTEL_TRACES_EXPORTER（支持多个）
+│   ├── 加载 ConfigurableSpanExporterProvider SPI
+│   └── 应用 exporterCustomizer
+│
+├── 4. 为每个导出器创建批处理器
+│   ├── OTEL_BSP_SCHEDULE_DELAY
+│   ├── OTEL_BSP_MAX_QUEUE_SIZE
+│   ├── OTEL_BSP_MAX_EXPORT_BATCH_SIZE
+│   ├── OTEL_BSP_EXPORT_TIMEOUT
+│   └── 应用 processorCustomizer
+│
+└── 5. 添加到 TracerProviderBuilder
+```
+
+**相关环境变量**:
+
+| 环境变量 | 类型 | 默认值 | 说明 |
+|---------|------|-------|------|
+| `OTEL_TRACES_EXPORTER` | String | `otlp` | 导出器名称（可多个，逗号分隔） |
+| `OTEL_TRACES_SAMPLER` | String | `parentbased_always_on` | 采样器名称 |
+| `OTEL_TRACES_SAMPLER_ARG` | Double | - | 采样器参数（如采样率） |
+| `OTEL_BSP_SCHEDULE_DELAY` | Duration | `5000ms` | 批处理调度延迟 |
+| `OTEL_BSP_MAX_QUEUE_SIZE` | Integer | `2048` | 最大队列大小 |
+| `OTEL_BSP_MAX_EXPORT_BATCH_SIZE` | Integer | `512` | 每批最大 Span 数 |
+| `OTEL_BSP_EXPORT_TIMEOUT` | Duration | `30000ms` | 导出超时 |
+| `OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT` | Integer | `128` | Span 最大属性数 |
+| `OTEL_SPAN_EVENT_COUNT_LIMIT` | Integer | `128` | Span 最大事件数 |
+| `OTEL_SPAN_LINK_COUNT_LIMIT` | Integer | `128` | Span 最大链接数 |
+
+**内置采样器**:
+
+- `always_on` - 100% 采样
+- `always_off` - 0% 采样
+- `traceidratio` - 基于 TraceId 的比例采样
+- `parentbased_always_on` - 继承父 Span，根 Span 100% 采样
+- `parentbased_always_off` - 继承父 Span，根 Span 0% 采样
+- `parentbased_traceidratio` - 继承父 Span，根 Span 比例采样
+
+#### 1.5 MeterProviderConfiguration
+
+**包路径**: `io.opentelemetry.sdk.autoconfigure.internal.MeterProviderConfiguration`
+
+**职责**: 配置 MeterProvider（Metrics 信号），包括导出器、读取器。
+
+**核心方法**:
+
+```java
+final class MeterProviderConfiguration {
+    /**
+     * 配置 MeterProvider
+     */
+    static void configureMeterProvider(
+        SdkMeterProviderBuilder meterProviderBuilder,
+        ConfigProperties config,
+        SpiHelper spiHelper,
+        BiFunction<? super MetricReader, ConfigProperties, ? extends MetricReader> metricReaderCustomizer,
+        BiFunction<? super MetricExporter, ConfigProperties, ? extends MetricExporter> metricExporterCustomizer,
+        List<Closeable> closeables) {
+
+        // 1. 配置 MetricReader
+        List<MetricReader> readers = MetricExporterConfiguration.configureMetricReaders(
+            config, spiHelper, metricExporterCustomizer, closeables);
+
+        for (MetricReader reader : readers) {
+            reader = metricReaderCustomizer.apply(reader, config);
+            meterProviderBuilder.registerMetricReader(reader);
+        }
+
+        // 2. 配置 Exemplar Filter
+        meterProviderBuilder.setExemplarFilter(configureExemplarFilter(config));
+
+        // 3. 配置基数限制
+        int cardinalityLimit = config.getInt("otel.java.metrics.cardinality.limit", 2000);
+        meterProviderBuilder.setCardinalityLimit(cardinalityLimit);
+    }
+}
+```
+
+**配置流程**:
+
+```
+configureMeterProvider()
+│
+├── 1. 配置 MetricReader
+│   ├── 读取 OTEL_METRICS_EXPORTER（支持多个）
+│   ├── 加载 ConfigurableMetricExporterProvider SPI
+│   ├── 创建 PeriodicMetricReader（Push 模式）
+│   │   ├── OTEL_METRIC_EXPORT_INTERVAL
+│   │   └── OTEL_METRIC_EXPORT_TIMEOUT
+│   ├── 或加载 ConfigurableMetricReaderProvider（Pull 模式）
+│   └── 应用 metricReaderCustomizer
+│
+├── 2. 配置 Exemplar Filter
+│   ├── trace_based（默认）
+│   ├── always_on
+│   └── always_off
+│
+└── 3. 配置基数限制
+    └── OTEL_JAVA_METRICS_CARDINALITY_LIMIT
+```
+
+**相关环境变量**:
+
+| 环境变量 | 类型 | 默认值 | 说明 |
+|---------|------|-------|------|
+| `OTEL_METRICS_EXPORTER` | String | `otlp` | 导出器名称（可多个） |
+| `OTEL_METRIC_EXPORT_INTERVAL` | Duration | `60000ms` | 导出间隔 |
+| `OTEL_METRIC_EXPORT_TIMEOUT` | Duration | `30000ms` | 导出超时 |
+| `OTEL_METRICS_EXEMPLAR_FILTER` | String | `trace_based` | Exemplar 过滤器 |
+| `OTEL_JAVA_METRICS_CARDINALITY_LIMIT` | Integer | `2000` | 基数限制 |
+
+**Push vs Pull 模式**:
+
+**Push 模式**（主动导出）:
+- 使用 `PeriodicMetricReader` 周期性导出
+- 适用于 OTLP、Logging 等导出器
+- 配置项: `OTEL_METRIC_EXPORT_INTERVAL`
+
+**Pull 模式**（被动拉取）:
+- 使用 `PrometheusHttpServer` 等
+- 适用于 Prometheus
+- 配置项: `OTEL_EXPORTER_PROMETHEUS_PORT`, `OTEL_EXPORTER_PROMETHEUS_HOST`
+
+**示例**:
+```bash
+# Push 模式（OTLP）
+export OTEL_METRICS_EXPORTER=otlp
+export OTEL_METRIC_EXPORT_INTERVAL=30000
+
+# Pull 模式（Prometheus）
+export OTEL_METRICS_EXPORTER=prometheus
+export OTEL_EXPORTER_PROMETHEUS_PORT=9464
+
+# 同时使用
+export OTEL_METRICS_EXPORTER=otlp,prometheus
+```
+
+#### 1.6 LoggerProviderConfiguration
+
+**包路径**: `io.opentelemetry.sdk.autoconfigure.internal.LoggerProviderConfiguration`
+
+**职责**: 配置 LoggerProvider（Logs 信号），包括日志导出器、处理器。
+
+**核心方法**:
+
+```java
+final class LoggerProviderConfiguration {
+    /**
+     * 配置 LoggerProvider
+     */
+    static void configureLoggerProvider(
+        SdkLoggerProviderBuilder loggerProviderBuilder,
+        ConfigProperties config,
+        SpiHelper spiHelper,
+        MeterProvider meterProvider,
+        BiFunction<? super LogRecordExporter, ConfigProperties, ? extends LogRecordExporter> exporterCustomizer,
+        BiFunction<? super LogRecordProcessor, ConfigProperties, ? extends LogRecordProcessor> processorCustomizer,
+        List<Closeable> closeables) {
+
+        // 1. 配置日志导出器
+        List<LogRecordExporter> exporters = LogRecordExporterConfiguration.configureExporters(
+            config, spiHelper, closeables);
+
+        for (LogRecordExporter exporter : exporters) {
+            exporter = exporterCustomizer.apply(exporter, config);
+
+            // 2. 创建批处理器
+            LogRecordProcessor processor = configureBatchLogRecordProcessor(
+                config, exporter, meterProvider);
+            processor = processorCustomizer.apply(processor, config);
+
+            loggerProviderBuilder.addLogRecordProcessor(processor);
+            closeables.add(processor);
+        }
+
+        // 3. 配置日志限制
+        loggerProviderBuilder.setLogLimits(configureLogLimits(config));
+    }
+}
+```
+
+**配置流程**:
+
+```
+configureLoggerProvider()
+│
+├── 1. 配置日志导出器
+│   ├── 读取 OTEL_LOGS_EXPORTER
+│   ├── 加载 ConfigurableLogRecordExporterProvider SPI
+│   └── 应用 exporterCustomizer
+│
+├── 2. 为每个导出器创建批处理器
+│   ├── OTEL_BLRP_SCHEDULE_DELAY
+│   ├── OTEL_BLRP_MAX_QUEUE_SIZE
+│   ├── OTEL_BLRP_MAX_EXPORT_BATCH_SIZE
+│   ├── OTEL_BLRP_EXPORT_TIMEOUT
+│   └── 应用 processorCustomizer
+│
+└── 3. 配置日志限制
+    └── OTEL_ATTRIBUTE_COUNT_LIMIT
+```
+
+**相关环境变量**:
+
+| 环境变量 | 类型 | 默认值 | 说明 |
+|---------|------|-------|------|
+| `OTEL_LOGS_EXPORTER` | String | `otlp` | 日志导出器名称 |
+| `OTEL_BLRP_SCHEDULE_DELAY` | Duration | `1000ms` | 批处理调度延迟 |
+| `OTEL_BLRP_MAX_QUEUE_SIZE` | Integer | `2048` | 最大队列大小 |
+| `OTEL_BLRP_MAX_EXPORT_BATCH_SIZE` | Integer | `512` | 每批最大日志数 |
+| `OTEL_BLRP_EXPORT_TIMEOUT` | Duration | `30000ms` | 导出超时 |
+
+### 2. 组件工厂类
+
+组件工厂类负责创建特定类型的 SDK 组件，使用 `NamedSpiManager` 实现延迟加载和名称映射。
+
+#### 2.1 SpanExporterConfiguration
+
+**包路径**: `io.opentelemetry.sdk.autoconfigure.internal.SpanExporterConfiguration`
+
+**职责**: 创建 SpanExporter 实例，支持多导出器配置。
+
+**核心方法**:
+
+```java
+final class SpanExporterConfiguration {
+    /**
+     * 配置 Span 导出器
+     *
+     * @return 导出器列表（支持多个）
+     */
+    static List<SpanExporter> configureSpanExporters(
+        ConfigProperties config,
+        SpiHelper spiHelper,
+        MeterProvider meterProvider,
+        List<Closeable> closeables) {
+
+        // 读取 OTEL_TRACES_EXPORTER
+        List<String> exporterNames = config.getList("otel.traces.exporter", Arrays.asList("otlp"));
+
+        // 特殊值 "none" 表示不使用导出器
+        if (exporterNames.contains("none")) {
+            return Collections.emptyList();
+        }
+
+        // 创建 NamedSpiManager
+        NamedSpiManager<SpanExporter> spiExportersManager =
+            spiHelper.loadConfigured(
+                ConfigurableSpanExporterProvider.class,
+                ConfigurableSpanExporterProvider::getName,
+                ConfigurableSpanExporterProvider::createExporter,
+                config);
+
+        // 为每个名称创建导出器
+        List<SpanExporter> exporters = new ArrayList<>();
+        for (String exporterName : exporterNames) {
+            SpanExporter exporter = spiExportersManager.getByName(exporterName);
+            if (exporter == null) {
+                throw new ConfigurationException("Unrecognized value for otel.traces.exporter: " + exporterName);
+            }
+            exporters.add(exporter);
+            closeables.add(exporter);
+        }
+
+        return exporters;
+    }
+}
+```
+
+**NamedSpiManager 使用模式**:
+
+```
+读取配置
+OTEL_TRACES_EXPORTER=otlp,zipkin
+    ↓
+解析为名称列表
+["otlp", "zipkin"]
+    ↓
+NamedSpiManager.getByName("otlp")
+    ├── 检查缓存
+    ├── ServiceLoader.load(ConfigurableSpanExporterProvider)
+    ├── 遍历所有 Provider
+    ├── 找到 getName() == "otlp" 的 Provider
+    ├── 调用 createExporter(config)
+    ├── 缓存实例
+    └── 返回 SpanExporter
+    ↓
+NamedSpiManager.getByName("zipkin")
+    └── （同样流程）
+    ↓
+返回 [OtlpSpanExporter, ZipkinSpanExporter]
+```
+
+**内置导出器**:
+
+| 名称 | 类 | 说明 |
+|------|---|------|
+| `otlp` | `OtlpGrpcSpanExporter` / `OtlpHttpSpanExporter` | OTLP 协议（默认） |
+| `zipkin` | `ZipkinSpanExporter` | Zipkin 格式 |
+| `logging` | `LoggingSpanExporter` | 输出到控制台 |
+| `none` | - | 禁用导出 |
+
+**多导出器配置**:
+
+```bash
+# 同时导出到 OTLP 和 Zipkin
+export OTEL_TRACES_EXPORTER=otlp,zipkin
+
+# OTLP 配置
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+
+# Zipkin 配置
+export OTEL_EXPORTER_ZIPKIN_ENDPOINT=http://localhost:9411/api/v2/spans
+```
+
+#### 2.2 MetricExporterConfiguration
+
+**包路径**: `io.opentelemetry.sdk.autoconfigure.internal.MetricExporterConfiguration`
+
+**职责**: 创建 MetricExporter 和 MetricReader 实例，支持 Push 和 Pull 模式。
+
+**核心方法**:
+
+```java
+final class MetricExporterConfiguration {
+    /**
+     * 配置 Metric 读取器
+     *
+     * @return MetricReader 列表
+     */
+    static List<MetricReader> configureMetricReaders(
+        ConfigProperties config,
+        SpiHelper spiHelper,
+        BiFunction<? super MetricExporter, ConfigProperties, ? extends MetricExporter> exporterCustomizer,
+        List<Closeable> closeables) {
+
+        List<String> exporterNames = config.getList("otel.metrics.exporter", Arrays.asList("otlp"));
+
+        if (exporterNames.contains("none")) {
+            return Collections.emptyList();
+        }
+
+        // 1. 尝试加载 ConfigurableMetricReaderProvider (Pull 模式)
+        NamedSpiManager<MetricReader> readerManager =
+            spiHelper.loadConfigured(
+                ConfigurableMetricReaderProvider.class,
+                ConfigurableMetricReaderProvider::getName,
+                ConfigurableMetricReaderProvider::createMetricReader,
+                config);
+
+        // 2. 加载 ConfigurableMetricExporterProvider (Push 模式)
+        NamedSpiManager<MetricExporter> exporterManager =
+            spiHelper.loadConfigured(
+                ConfigurableMetricExporterProvider.class,
+                ConfigurableMetricExporterProvider::getName,
+                ConfigurableMetricExporterProvider::createExporter,
+                config);
+
+        List<MetricReader> readers = new ArrayList<>();
+
+        for (String exporterName : exporterNames) {
+            // 先尝试 MetricReader（Pull 模式）
+            MetricReader reader = readerManager.getByName(exporterName);
+            if (reader != null) {
+                readers.add(reader);
+                closeables.add(reader);
+                continue;
+            }
+
+            // 再尝试 MetricExporter（Push 模式）
+            MetricExporter exporter = exporterManager.getByName(exporterName);
+            if (exporter != null) {
+                exporter = exporterCustomizer.apply(exporter, config);
+
+                // 包装为 PeriodicMetricReader
+                long exportInterval = config.getDuration("otel.metric.export.interval", 60000);
+                reader = PeriodicMetricReader.builder(exporter)
+                    .setInterval(Duration.ofMillis(exportInterval))
+                    .build();
+
+                readers.add(reader);
+                closeables.add(reader);
+            } else {
+                throw new ConfigurationException(
+                    "Unrecognized value for otel.metrics.exporter: " + exporterName);
+            }
+        }
+
+        return readers;
+    }
+}
+```
+
+**Push vs Pull 决策流程**:
+
+```
+读取 OTEL_METRICS_EXPORTER
+    ↓
+遍历每个导出器名称
+    ↓
+    ├── 步骤 1: 尝试 ConfigurableMetricReaderProvider
+    │   └── 找到 → 使用 MetricReader（Pull 模式）
+    │       └── 示例: PrometheusHttpServer
+    │
+    └── 步骤 2: 尝试 ConfigurableMetricExporterProvider
+        └── 找到 → 创建 PeriodicMetricReader（Push 模式）
+            └── 示例: OtlpGrpcMetricExporter + PeriodicMetricReader
+```
+
+**内置导出器/读取器**:
+
+| 名称 | 模式 | 类 | 说明 |
+|------|-----|---|------|
+| `otlp` | Push | `OtlpGrpcMetricExporter` | OTLP 协议 |
+| `prometheus` | Pull | `PrometheusHttpServer` | Prometheus 拉取 |
+| `logging` | Push | `LoggingMetricExporter` | 输出到控制台 |
+| `none` | - | - | 禁用导出 |
+
+**配置示例**:
+
+```bash
+# Push 模式（OTLP）
+export OTEL_METRICS_EXPORTER=otlp
+export OTEL_METRIC_EXPORT_INTERVAL=30000
+export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://localhost:4317
+
+# Pull 模式（Prometheus）
+export OTEL_METRICS_EXPORTER=prometheus
+export OTEL_EXPORTER_PROMETHEUS_PORT=9464
+export OTEL_EXPORTER_PROMETHEUS_HOST=0.0.0.0
+
+# 混合模式
+export OTEL_METRICS_EXPORTER=otlp,prometheus
+```
+
+#### 2.3 LogRecordExporterConfiguration
+
+**包路径**: `io.opentelemetry.sdk.autoconfigure.internal.LogRecordExporterConfiguration`
+
+**职责**: 创建 LogRecordExporter 实例。
+
+**核心方法**:
+
+```java
+final class LogRecordExporterConfiguration {
+    /**
+     * 配置日志导出器
+     */
+    static List<LogRecordExporter> configureExporters(
+        ConfigProperties config,
+        SpiHelper spiHelper,
+        List<Closeable> closeables) {
+
+        List<String> exporterNames = config.getList("otel.logs.exporter", Arrays.asList("otlp"));
+
+        if (exporterNames.contains("none")) {
+            return Collections.emptyList();
+        }
+
+        NamedSpiManager<LogRecordExporter> exporterManager =
+            spiHelper.loadConfigured(
+                ConfigurableLogRecordExporterProvider.class,
+                ConfigurableLogRecordExporterProvider::getName,
+                ConfigurableLogRecordExporterProvider::createExporter,
+                config);
+
+        List<LogRecordExporter> exporters = new ArrayList<>();
+        for (String exporterName : exporterNames) {
+            LogRecordExporter exporter = exporterManager.getByName(exporterName);
+            if (exporter == null) {
+                throw new ConfigurationException(
+                    "Unrecognized value for otel.logs.exporter: " + exporterName);
+            }
+            exporters.add(exporter);
+            closeables.add(exporter);
+        }
+
+        return exporters;
+    }
+}
+```
+
+**内置导出器**:
+
+| 名称 | 类 | 说明 |
+|------|---|------|
+| `otlp` | `OtlpHttpLogRecordExporter` | OTLP 协议 |
+| `logging` | `SystemOutLogRecordExporter` | 输出到控制台 |
+| `none` | - | 禁用导出 |
+
+#### 2.4 PropagatorConfiguration
+
+**包路径**: `io.opentelemetry.sdk.autoconfigure.internal.PropagatorConfiguration`
+
+**职责**: 创建 TextMapPropagator 实例，支持组合传播器。
+
+**核心方法**:
+
+```java
+final class PropagatorConfiguration {
+    /**
+     * 配置传播器
+     */
+    static ContextPropagators configurePropagators(
+        ConfigProperties config,
+        SpiHelper spiHelper,
+        BiFunction<? super TextMapPropagator, ConfigProperties, ? extends TextMapPropagator> propagatorCustomizer) {
+
+        // 读取 OTEL_PROPAGATORS
+        List<String> propagatorNames = config.getList(
+            "otel.propagators",
+            Arrays.asList("tracecontext", "baggage"));
+
+        NamedSpiManager<TextMapPropagator> propagatorManager =
+            spiHelper.loadConfigured(
+                ConfigurablePropagatorProvider.class,
+                ConfigurablePropagatorProvider::getName,
+                ConfigurablePropagatorProvider::getPropagator,
+                config);
+
+        // 加载每个传播器
+        List<TextMapPropagator> propagators = new ArrayList<>();
+        for (String propagatorName : propagatorNames) {
+            TextMapPropagator propagator = propagatorManager.getByName(propagatorName);
+            if (propagator == null) {
+                throw new ConfigurationException(
+                    "Unrecognized value for otel.propagators: " + propagatorName);
+            }
+            propagators.add(propagator);
+        }
+
+        // 组合所有传播器
+        TextMapPropagator compositePropagator;
+        if (propagators.isEmpty()) {
+            compositePropagator = TextMapPropagator.noop();
+        } else if (propagators.size() == 1) {
+            compositePropagator = propagators.get(0);
+        } else {
+            compositePropagator = TextMapPropagator.composite(
+                propagators.toArray(new TextMapPropagator[0]));
+        }
+
+        // 应用定制器
+        compositePropagator = propagatorCustomizer.apply(compositePropagator, config);
+
+        return ContextPropagators.create(compositePropagator);
+    }
+}
+```
+
+**内置传播器**:
+
+| 名称 | 类 | 说明 |
+|------|---|------|
+| `tracecontext` | `W3CTraceContextPropagator` | W3C Trace Context（推荐） |
+| `baggage` | `W3CBaggagePropagator` | W3C Baggage |
+| `b3` | `B3Propagator` | B3 Single Header |
+| `b3multi` | `B3Propagator` | B3 Multi Header |
+| `jaeger` | `JaegerPropagator` | Jaeger 格式 |
+| `ottrace` | `OtTracePropagator` | OT Trace |
+
+**组合传播器示例**:
+
+```bash
+# 使用 W3C Trace Context + Baggage
+export OTEL_PROPAGATORS=tracecontext,baggage
+
+# 使用 B3 + Jaeger（多协议兼容）
+export OTEL_PROPAGATORS=b3,jaeger
+
+# 使用单个传播器
+export OTEL_PROPAGATORS=tracecontext
+```
+
+**传播器工作原理**:
+
+```
+出站请求（Inject）
+    ↓
+TextMapPropagator.inject(context, carrier, setter)
+    ├── W3CTraceContextPropagator
+    │   ├── 设置 traceparent: 00-<trace-id>-<span-id>-01
+    │   └── 设置 tracestate: ...
+    ├── W3CBaggagePropagator
+    │   └── 设置 baggage: key1=value1,key2=value2
+    └── B3Propagator
+        └── 设置 X-B3-TraceId, X-B3-SpanId, ...
+    ↓
+HTTP Headers 包含所有传播信息
+
+入站请求（Extract）
+    ↓
+TextMapPropagator.extract(context, carrier, getter)
+    ├── W3CTraceContextPropagator
+    │   └── 从 traceparent 提取 SpanContext
+    ├── W3CBaggagePropagator
+    │   └── 从 baggage 提取 Baggage
+    └── B3Propagator
+        └── 从 X-B3-* 提取 SpanContext
+    ↓
+Context 包含提取的 SpanContext 和 Baggage
+```
+
+### 3. 辅助类
+
+辅助类提供核心功能支持，包括 SPI 加载、配置工具等。
+
+#### 3.1 SpiHelper
+
+**包路径**: `io.opentelemetry.sdk.autoconfigure.internal.SpiHelper`
+
+**职责**: SPI 加载和生命周期管理，是 ServiceLoader 的包装器。
+
+**核心方法**:
+
+```java
+final class SpiHelper {
+    /**
+     * 加载 SPI 实现（无序）
+     */
+    public <T> Iterable<T> load(Class<T> spiClass) {
+        return componentLoader.load(spiClass);
+    }
+
+    /**
+     * 加载 SPI 实现（按 Ordered 接口排序）
+     */
+    public <T extends Ordered> List<T> loadOrdered(Class<T> spiClass) {
+        List<T> result = new ArrayList<>();
+        for (T implementation : componentLoader.load(spiClass)) {
+            result.add(implementation);
+        }
+
+        // 按 order() 值排序（升序）
+        result.sort(Comparator.comparingInt(Ordered::order));
+
+        return result;
+    }
+
+    /**
+     * 加载命名 SPI（用于 NamedSpiManager）
+     */
+    public <T, C> NamedSpiManager<C> loadConfigured(
+        Class<T> providerClass,
+        Function<T, String> getName,
+        BiFunction<T, ConfigProperties, C> createComponent,
+        ConfigProperties config) {
+
+        return NamedSpiManager.create(this, providerClass, getName, createComponent, config);
+    }
+
+    /**
+     * 获取 ComponentLoader
+     */
+    public ComponentLoader getComponentLoader() {
+        return componentLoader;
+    }
+
+    /**
+     * 获取 AutoConfigureListener 列表
+     */
+    public List<AutoConfigureListener> getListeners() {
+        List<AutoConfigureListener> listeners = new ArrayList<>();
+        for (AutoConfigureListener listener : componentLoader.load(AutoConfigureListener.class)) {
+            listeners.add(listener);
+        }
+        return listeners;
+    }
+}
+```
+
+**Ordered 接口排序**:
+
+```java
+// 示例：三个 ResourceProvider
+public class Provider1 implements ResourceProvider {
+    @Override public int order() { return -100; }  // 最早执行
+}
+
+public class Provider2 implements ResourceProvider {
+    @Override public int order() { return 0; }     // 中间执行（默认）
+}
+
+public class Provider3 implements ResourceProvider {
+    @Override public int order() { return 100; }   // 最晚执行（优先级最高）
+}
+
+// SpiHelper.loadOrdered(ResourceProvider.class)
+// 返回顺序: [Provider1, Provider2, Provider3]
+// Resource 合并: Resource1 → Resource2 → Resource3
+// Provider3 的属性会覆盖 Provider1 和 Provider2
+```
+
+#### 3.2 NamedSpiManager
+
+**包路径**: `io.opentelemetry.sdk.autoconfigure.internal.NamedSpiManager`
+
+**职责**: 命名 SPI 的延迟加载管理器，根据名称查找和创建 SPI 实例。
+
+**核心方法**:
+
+```java
+final class NamedSpiManager<T> {
+    /**
+     * 根据名称获取组件（延迟加载）
+     */
+    @Nullable
+    public T getByName(String name) {
+        // 1. 检查缓存
+        T cached = cache.get(name);
+        if (cached != null) {
+            return cached;
+        }
+
+        // 2. 加载所有 Provider
+        for (P provider : spiHelper.load(providerClass)) {
+            String providerName = getName.apply(provider);
+
+            // 3. 找到匹配名称的 Provider
+            if (providerName.equals(name)) {
+                // 4. 创建组件
+                T component = createComponent.apply(provider, config);
+
+                // 5. 缓存
+                cache.put(name, component);
+
+                return component;
+            }
+        }
+
+        // 6. 未找到
+        return null;
+    }
+
+    /**
+     * 获取所有可用的名称
+     */
+    public Set<String> getNames() {
+        Set<String> names = new HashSet<>();
+        for (P provider : spiHelper.load(providerClass)) {
+            names.add(getName.apply(provider));
+        }
+        return names;
+    }
+}
+```
+
+**延迟加载设计**:
+
+```
+时间轴
+    │
+    ├── T1: 创建 NamedSpiManager
+    │   └── 仅保存配置，不加载任何 SPI
+    │
+    ├── T2: 第一次调用 getByName("otlp")
+    │   ├── ServiceLoader.load(ConfigurableSpanExporterProvider)
+    │   ├── 遍历所有 Provider
+    │   ├── 找到 getName() == "otlp" 的 Provider
+    │   ├── 调用 createExporter(config)
+    │   ├── 缓存 "otlp" → OtlpSpanExporter
+    │   └── 返回 OtlpSpanExporter
+    │
+    └── T3: 第二次调用 getByName("otlp")
+        ├── 从缓存读取
+        └── 直接返回 OtlpSpanExporter（不重新创建）
+```
+
+**优势**:
+
+1. **按需加载**: 只加载实际使用的组件
+2. **避免浪费**: 不创建未配置的导出器
+3. **性能优化**: 缓存避免重复创建
+4. **失败快速**: 配置错误时立即抛出异常
+
+#### 3.3 ComponentLoader
+
+**包路径**: `io.opentelemetry.sdk.autoconfigure.internal.ComponentLoader`
+
+**职责**: 组件类加载器，是 ServiceLoader 的抽象。
+
+**核心方法**:
+
+```java
+interface ComponentLoader {
+    /**
+     * 加载 SPI 实现
+     */
+    <T> Iterable<T> load(Class<T> spiClass);
+
+    /**
+     * 创建默认 ComponentLoader
+     */
+    static ComponentLoader defaultComponentLoader() {
+        return forClassLoader(ComponentLoader.class.getClassLoader());
+    }
+
+    /**
+     * 为指定 ClassLoader 创建 ComponentLoader
+     */
+    static ComponentLoader forClassLoader(ClassLoader classLoader) {
+        return new ServiceLoaderComponentLoader(classLoader);
+    }
+}
+
+// 实现类
+final class ServiceLoaderComponentLoader implements ComponentLoader {
+    private final ClassLoader classLoader;
+
+    @Override
+    public <T> Iterable<T> load(Class<T> spiClass) {
+        return ServiceLoader.load(spiClass, classLoader);
+    }
+}
+```
+
+**使用场景**:
+
+- 支持自定义 ClassLoader（如 OSGi、模块化系统）
+- 测试时使用 mock ComponentLoader
+- 隔离不同模块的 SPI 实现
+
+#### 3.4 AutoConfigureUtil
+
+**包路径**: `io.opentelemetry.sdk.autoconfigure.internal.AutoConfigureUtil`
+
+**职责**: 配置工具类，提供各种配置辅助方法。
+
+**核心方法**:
+
+```java
+final class AutoConfigureUtil {
+    /**
+     * 解析时间间隔字符串
+     */
+    static long parseDuration(String value) {
+        // 支持: "5000", "5s", "5000ms"
+    }
+
+    /**
+     * 解析布尔值
+     */
+    static boolean parseBoolean(String value) {
+        // 支持: "true", "false", "1", "0"
+    }
+
+    /**
+     * 解析 Map（key1=val1,key2=val2 格式）
+     */
+    static Map<String, String> parseMap(String value) {
+        // 示例: "environment=prod,region=us" → {"environment": "prod", "region": "us"}
+    }
+
+    /**
+     * 解析列表（逗号分隔）
+     */
+    static List<String> parseList(String value) {
+        // 示例: "otlp,zipkin,logging" → ["otlp", "zipkin", "logging"]
+    }
+}
+```
+
+#### 3.5 IncubatingUtil
+
+**包路径**: `io.opentelemetry.sdk.autoconfigure.internal.IncubatingUtil`
+
+**职责**: 实验性功能工具，支持声明式配置（YAML 文件）。
+
+**核心方法**:
+
+```java
+final class IncubatingUtil {
+    /**
+     * 从 YAML 文件配置 SDK
+     */
+    static AutoConfiguredOpenTelemetrySdk configureFromFile(
+        Logger logger,
+        String configurationFile,
+        ComponentLoader componentLoader) {
+
+        try (FileInputStream inputStream = new FileInputStream(configurationFile)) {
+            return DeclarativeConfiguration.parseAndCreate(inputStream);
+        } catch (IOException e) {
+            throw new ConfigurationException("Failed to load configuration file: " + configurationFile, e);
+        }
+    }
+
+    /**
+     * 从 SPI 配置（experimental.sdk.config.provider）
+     */
+    @Nullable
+    static AutoConfiguredOpenTelemetrySdk configureFromSpi(ComponentLoader componentLoader) {
+        // 加载 OpenTelemetrySdkConfigProvider SPI
+        // 用于从自定义源加载配置
+    }
+}
+```
+
+**YAML 配置示例**:
+
+```yaml
+file_format: "1.0"
+
+resource:
+  attributes:
+    service.name: my-service
+    deployment.environment: production
+
+tracer_provider:
+  sampler:
+    parent_based:
+      root:
+        trace_id_ratio_based:
+          ratio: 0.1
+  processors:
+    - batch:
+        schedule_delay: 5000
+        max_queue_size: 2048
+        max_export_batch_size: 512
+        exporter: otlp
+
+exporters:
+  otlp:
+    endpoint: http://localhost:4317
+    timeout: 10000
+    compression: gzip
+```
+
+**使用方式**:
+
+```bash
+# 通过环境变量指定配置文件
+export OTEL_EXPERIMENTAL_CONFIG_FILE=/path/to/config.yaml
+
+# Java 代码会自动检测并使用
+```
+
+#### 3.6 EnvironmentResourceProvider
+
+**包路径**: `io.opentelemetry.sdk.autoconfigure.internal.EnvironmentResourceProvider`
+
+**职责**: 环境资源属性检测，自动识别运行环境。
+
+**检测的资源类型**:
+
+1. **操作系统信息** (`OsResourceProvider`):
+   - `os.type` - 操作系统类型（linux, windows, darwin）
+   - `os.description` - 操作系统描述
+
+2. **进程信息** (`ProcessResourceProvider`, `ProcessRuntimeResourceProvider`):
+   - `process.pid` - 进程 ID
+   - `process.executable.name` - 可执行文件名
+   - `process.command_line` - 命令行
+   - `process.runtime.name` - 运行时名称（Java）
+   - `process.runtime.version` - 运行时版本
+
+3. **主机信息** (`HostResourceProvider`):
+   - `host.name` - 主机名
+   - `host.arch` - 主机架构（amd64, arm64）
+
+4. **容器信息** (`ContainerResourceProvider`):
+   - `container.id` - 容器 ID（从 cgroup 读取）
+
+**实现示例**:
+
+```java
+public class HostResourceProvider implements ResourceProvider {
+    @Override
+    public Resource createResource(ConfigProperties config) {
+        String hostname;
+        try {
+            hostname = InetAddress.getLocalHost().getHostName();
+        } catch (UnknownHostException e) {
+            hostname = "unknown";
+        }
+
+        return Resource.create(Attributes.of(
+            AttributeKey.stringKey("host.name"), hostname,
+            AttributeKey.stringKey("host.arch"), System.getProperty("os.arch")
+        ));
+    }
+}
+```
+
+### 4. 组件关系图
+
+#### 4.1 类依赖关系图
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                 AutoConfiguredOpenTelemetrySdk               │
+│                     (不可变包装器)                            │
+│  - OpenTelemetrySdk openTelemetrySdk                        │
+│  - Resource resource                                        │
+│  - ConfigProperties config                                  │
+└──────────────────────────┬──────────────────────────────────┘
+                           │ 由 Builder 创建
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│            AutoConfiguredOpenTelemetrySdkBuilder            │
+│                     (主构建器)                               │
+│  - buildImpl() 核心方法                                      │
+│  - 14+ customizer 方法                                       │
+└───┬─────┬─────┬─────┬─────┬─────┬─────────────────────────┘
+    │     │     │     │     │     │
+    │     │     │     │     │     └────────┐
+    ▼     ▼     ▼     ▼     ▼     ▼        ▼
+┌────┐┌────┐┌────┐┌────┐┌────┐┌────┐┌────────┐
+│Res││Trac││Mete││Logg││Prop││SpiH││Incubat│
+│our││erPr││rPro││erPr││agat││elpe││ingUtil│
+│ceC││ovid││vide││ovid││orCo││r   ││       │
+│onf││erCo││rCon││erCo││nfig││    ││       │
+│ig ││nfig││fig ││nfig││    ││    ││       │
+└─┬──┘└─┬──┘└─┬──┘└─┬──┘└─┬──┘└─┬──┘└───────┘
+  │     │     │     │     │     │
+  │     │     │     │     │     ├──────┐
+  │     │     │     │     │     │      │
+  │     ▼     ▼     ▼     ▼     ▼      ▼
+  │  ┌────┐┌────┐┌────┐┌────┐┌────┐┌────┐
+  │  │Span││Metr││LogR││Prop││Name││Comp│
+  │  │Expo││icEx││ecor││agat││dSpi││onen│
+  │  │rter││port││dExp││orCo││Mana││tLoa│
+  │  │Conf││erCo││orte││nfig││ger ││der │
+  │  │ig  ││nfig││rCon││    ││    ││    │
+  │  └────┘└────┘└────┘└────┘└────┘└────┘
+  │     │     │     │     │
+  │     └─────┴─────┴─────┴──────────┐
+  │                                   │
+  └───────────────────────────────────┼──────┐
+                                      │      │
+                                      ▼      ▼
+                                  ┌────┐  ┌────┐
+                                  │SPI │  │环境│
+                                  │实现│  │资源│
+                                  │    │  │检测│
+                                  └────┘  └────┘
+```
+
+#### 4.2 配置流程序列图
+
+```
+用户代码                Builder              各配置类              SPI实现
+  │                      │                     │                     │
+  │  initialize()        │                     │                     │
+  ├─────────────────────>│                     │                     │
+  │                      │  buildImpl()        │                     │
+  │                      ├────────────────────>│                     │
+  │                      │                     │                     │
+  │                      │  1. 尝试 YAML 配置  │                     │
+  │                      │  maybeConfigureFromFile()                 │
+  │                      │─ ─ ─ ─ ─ ─ ─ ─ ─ ─>│                     │
+  │                      │<─ ─ ─ ─ ─ ─ ─ ─ ─ ─│                     │
+  │                      │                     │                     │
+  │                      │  2. 加载 SPI 和定制器                     │
+  │                      │  SpiHelper.create()│                     │
+  │                      │────────────────────>│                     │
+  │                      │  load SPI           │  ServiceLoader     │
+  │                      │                     ├───────────────────>│
+  │                      │                     │<───────────────────┤
+  │                      │<────────────────────┤                     │
+  │                      │                     │                     │
+  │                      │  3. 加载配置属性    │                     │
+  │                      │  getConfig()        │                     │
+  │                      │────────────────────>│                     │
+  │                      │<────────────────────┤                     │
+  │                      │                     │                     │
+  │                      │  4. 配置 Resource   │                     │
+  │                      │  ResourceConfiguration.configureResource()│
+  │                      │────────────────────>│                     │
+  │                      │                     │  load ResourceProvider
+  │                      │                     ├───────────────────>│
+  │                      │                     │  createResource()  │
+  │                      │                     │<───────────────────┤
+  │                      │<────────────────────┤                     │
+  │                      │                     │                     │
+  │                      │  5. 配置 SDK 组件   │                     │
+  │                      │  configureSdk()     │                     │
+  │                      │────────────────────>│                     │
+  │                      │                     │                     │
+  │                      │  5.1 MeterProvider  │                     │
+  │                      │  MeterProviderConfiguration               │
+  │                      │                     ├────────────────────>│
+  │                      │                     │  load MetricExporter
+  │                      │                     │<────────────────────┤
+  │                      │                     │                     │
+  │                      │  5.2 TracerProvider │                     │
+  │                      │  TracerProviderConfiguration              │
+  │                      │                     ├────────────────────>│
+  │                      │                     │  load SpanExporter │
+  │                      │                     │<────────────────────┤
+  │                      │                     │                     │
+  │                      │  5.3 LoggerProvider │                     │
+  │                      │  LoggerProviderConfiguration              │
+  │                      │                     ├────────────────────>│
+  │                      │                     │  load LogExporter  │
+  │                      │                     │<────────────────────┤
+  │                      │<────────────────────┤                     │
+  │                      │                     │                     │
+  │                      │  6. 构建 SDK        │                     │
+  │                      │  build()            │                     │
+  │                      │────────────────────>│                     │
+  │                      │<────────────────────┤                     │
+  │                      │                     │                     │
+  │<─────────────────────┤                     │                     │
+  │  AutoConfiguredOpenTelemetrySdk            │                     │
+  │                      │                     │                     │
+```
+
+#### 4.3 SPI 加载时序图
+
+```
+NamedSpiManager        ServiceLoader        Provider1        Provider2
+      │                     │                   │               │
+      │  getByName("otlp")  │                   │               │
+      ├────────────────────>│                   │               │
+      │                     │  load()           │               │
+      │                     ├──────────────────>│               │
+      │                     │  new Provider1()  │               │
+      │                     │<──────────────────┤               │
+      │                     │                   │               │
+      │                     │  load()           │               │
+      │                     ├──────────────────────────────────>│
+      │                     │  new Provider2()  │               │
+      │                     │<──────────────────────────────────┤
+      │<────────────────────┤                   │               │
+      │  Iterable<Provider> │                   │               │
+      │                     │                   │               │
+      │  遍历 Provider      │                   │               │
+      ├────────────────────────────────────────>│               │
+      │  getName()          │                   │               │
+      │<────────────────────────────────────────┤               │
+      │  "jaeger"           │                   │               │
+      │                     │                   │               │
+      ├──────────────────────────────────────────────────────────>│
+      │  getName()          │                   │               │
+      │<────────────────────────────────────────────────────────┤
+      │  "otlp" ✓ 匹配！     │                   │               │
+      │                     │                   │               │
+      ├──────────────────────────────────────────────────────────>│
+      │  createExporter(config)                 │               │
+      │<────────────────────────────────────────────────────────┤
+      │  OtlpSpanExporter   │                   │               │
+      │                     │                   │               │
+      │  缓存 "otlp" → OtlpSpanExporter         │               │
+      │                     │                   │               │
+      │  返回 OtlpSpanExporter                  │               │
+      │                     │                   │               │
+```
+
+### 5. 配置属性全景
+
+#### 5.1 按组件分类的配置属性表
+
+##### Resource 配置属性
+
+| 环境变量 | 类型 | 默认值 | 说明 |
+|---------|------|-------|------|
+| `OTEL_SERVICE_NAME` | String | - | 服务名称 |
+| `OTEL_RESOURCE_ATTRIBUTES` | Map | - | Resource 属性（key1=val1,key2=val2） |
+| `OTEL_JAVA_ENABLED_RESOURCE_PROVIDERS` | List | - | 启用的 ResourceProvider 类名 |
+| `OTEL_JAVA_DISABLED_RESOURCE_PROVIDERS` | List | - | 禁用的 ResourceProvider 类名 |
+| `OTEL_RESOURCE_DISABLED_KEYS` | List | - | 要移除的 Resource 属性键 |
+
+##### TracerProvider 配置属性
+
+| 环境变量 | 类型 | 默认值 | 说明 |
+|---------|------|-------|------|
+| `OTEL_TRACES_EXPORTER` | String | `otlp` | 导出器名称（可多个：otlp,zipkin,logging） |
+| `OTEL_TRACES_SAMPLER` | String | `parentbased_always_on` | 采样器名称 |
+| `OTEL_TRACES_SAMPLER_ARG` | Double | - | 采样器参数（如采样率） |
+| `OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT` | Integer | `128` | Span 最大属性数 |
+| `OTEL_SPAN_EVENT_COUNT_LIMIT` | Integer | `128` | Span 最大事件数 |
+| `OTEL_SPAN_LINK_COUNT_LIMIT` | Integer | `128` | Span 最大链接数 |
+| `OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT` | Integer | - | 属性值长度限制 |
+| `OTEL_BSP_SCHEDULE_DELAY` | Duration | `5000ms` | 批处理调度延迟 |
+| `OTEL_BSP_MAX_QUEUE_SIZE` | Integer | `2048` | 最大队列大小 |
+| `OTEL_BSP_MAX_EXPORT_BATCH_SIZE` | Integer | `512` | 每批最大 Span 数 |
+| `OTEL_BSP_EXPORT_TIMEOUT` | Duration | `30000ms` | 导出超时 |
+
+##### MeterProvider 配置属性
+
+| 环境变量 | 类型 | 默认值 | 说明 |
+|---------|------|-------|------|
+| `OTEL_METRICS_EXPORTER` | String | `otlp` | 导出器名称（可多个） |
+| `OTEL_METRIC_EXPORT_INTERVAL` | Duration | `60000ms` | 导出间隔 |
+| `OTEL_METRIC_EXPORT_TIMEOUT` | Duration | `30000ms` | 导出超时 |
+| `OTEL_METRICS_EXEMPLAR_FILTER` | String | `trace_based` | Exemplar 过滤器 |
+| `OTEL_JAVA_METRICS_CARDINALITY_LIMIT` | Integer | `2000` | 基数限制 |
+
+##### LoggerProvider 配置属性
+
+| 环境变量 | 类型 | 默认值 | 说明 |
+|---------|------|-------|------|
+| `OTEL_LOGS_EXPORTER` | String | `otlp` | 日志导出器名称 |
+| `OTEL_BLRP_SCHEDULE_DELAY` | Duration | `1000ms` | 批处理调度延迟 |
+| `OTEL_BLRP_MAX_QUEUE_SIZE` | Integer | `2048` | 最大队列大小 |
+| `OTEL_BLRP_MAX_EXPORT_BATCH_SIZE` | Integer | `512` | 每批最大日志数 |
+| `OTEL_BLRP_EXPORT_TIMEOUT` | Duration | `30000ms` | 导出超时 |
+
+##### Propagator 配置属性
+
+| 环境变量 | 类型 | 默认值 | 说明 |
+|---------|------|-------|------|
+| `OTEL_PROPAGATORS` | List | `tracecontext,baggage` | 传播器列表 |
+
+##### OTLP 导出器配置属性
+
+| 环境变量 | 类型 | 默认值 | 说明 |
+|---------|------|-------|------|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | String | `http://localhost:4317` | OTLP 端点 |
+| `OTEL_EXPORTER_OTLP_HEADERS` | Map | - | HTTP 头 |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` | Duration | `10000ms` | 超时 |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | String | `grpc` | 协议（grpc, http/protobuf） |
+| `OTEL_EXPORTER_OTLP_COMPRESSION` | String | - | 压缩方式（gzip, none） |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | String | - | Traces 特定端点 |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | String | - | Metrics 特定端点 |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | String | - | Logs 特定端点 |
+
+##### Prometheus 导出器配置属性
+
+| 环境变量 | 类型 | 默认值 | 说明 |
+|---------|------|-------|------|
+| `OTEL_EXPORTER_PROMETHEUS_PORT` | Integer | `9464` | HTTP 服务器端口 |
+| `OTEL_EXPORTER_PROMETHEUS_HOST` | String | `localhost` | HTTP 服务器主机 |
+
+##### Zipkin 导出器配置属性
+
+| 环境变量 | 类型 | 默认值 | 说明 |
+|---------|------|-------|------|
+| `OTEL_EXPORTER_ZIPKIN_ENDPOINT` | String | `http://localhost:9411/api/v2/spans` | Zipkin 端点 |
+| `OTEL_EXPORTER_ZIPKIN_TIMEOUT` | Duration | `10000ms` | 超时 |
+
+### 6. 最佳实践
+
+#### 6.1 定制器使用指南
+
+##### 何时使用 BiFunction 定制器
+
+**BiFunction 定制器**适用于包装或修改已创建的组件：
+
+```java
+// 包装导出器添加日志
+.addSpanExporterCustomizer((exporter, config) ->
+    new LoggingSpanExporter(exporter))
+
+// 包装处理器添加过滤
+.addSpanProcessorCustomizer((processor, config) ->
+    new FilteringSpanProcessor(processor))
+
+// 修改 Resource 属性
+.addResourceCustomizer((resource, config) ->
+    resource.toBuilder()
+        .put("additional.attribute", "value")
+        .build())
+```
+
+##### 何时使用 Builder 定制器
+
+**Builder 定制器**适用于直接配置 Provider Builder：
+
+```java
+// 直接配置 TracerProvider
+.addTracerProviderCustomizer((builder, config) ->
+    builder.setSampler(Sampler.alwaysOn())
+           .setSpanLimits(SpanLimits.builder()
+               .setMaxNumberOfAttributes(64)
+               .build()))
+
+// 配置 MeterProvider 的 View
+.addMeterProviderCustomizer((builder, config) ->
+    builder.registerView(
+        InstrumentSelector.builder()
+            .setType(InstrumentType.HISTOGRAM)
+            .build(),
+        View.builder()
+            .setAggregation(Aggregation.explicitBucketHistogram(
+                Arrays.asList(0.1, 0.5, 1.0, 5.0, 10.0)))
+            .build()))
+```
+
+##### 定制器执行顺序
+
+定制器按以下顺序执行：
+
+1. **配置属性层**: `propertiesSupplier` → `propertiesCustomizer`
+2. **Resource 层**: `resourceCustomizer`
+3. **传播器层**: `propagatorCustomizer`
+4. **Meter 层**: `metricExporterCustomizer` → `metricReaderCustomizer` → `meterProviderCustomizer`
+5. **Tracer 层**: `samplerCustomizer` → `spanExporterCustomizer` → `spanProcessorCustomizer` → `tracerProviderCustomizer`
+6. **Logger 层**: `logRecordExporterCustomizer` → `logRecordProcessorCustomizer` → `loggerProviderCustomizer`
+
+##### 链式定制器模式
+
+多个定制器会依次执行，形成链式调用：
+
+```java
+AutoConfiguredOpenTelemetrySdk.builder()
+    // 定制器 1
+    .addSpanExporterCustomizer((exporter, config) -> {
+        System.out.println("Customizer 1: Adding logging");
+        return new LoggingSpanExporter(exporter);
+    })
+    // 定制器 2（包装定制器 1 的结果）
+    .addSpanExporterCustomizer((exporter, config) -> {
+        System.out.println("Customizer 2: Adding retry logic");
+        return new RetrySpanExporter(exporter);
+    })
+    .build();
+
+// 执行结果:
+// RetrySpanExporter → LoggingSpanExporter → OtlpSpanExporter
+```
+
+#### 6.2 性能优化
+
+##### 批处理器调优
+
+```bash
+# 高吞吐量场景（牺牲实时性）
+export OTEL_BSP_SCHEDULE_DELAY=10000           # 10秒导出一次
+export OTEL_BSP_MAX_QUEUE_SIZE=8192            # 增大队列
+export OTEL_BSP_MAX_EXPORT_BATCH_SIZE=2048     # 增大批大小
+
+# 低延迟场景（更实时）
+export OTEL_BSP_SCHEDULE_DELAY=1000            # 1秒导出一次
+export OTEL_BSP_MAX_QUEUE_SIZE=1024            # 较小队列
+export OTEL_BSP_MAX_EXPORT_BATCH_SIZE=256      # 较小批大小
+
+# 内存受限场景
+export OTEL_BSP_MAX_QUEUE_SIZE=512             # 减小队列
+export OTEL_BSP_MAX_EXPORT_BATCH_SIZE=128      # 减小批大小
+```
+
+##### 采样率配置
+
+```bash
+# 生产环境（1% 采样）
+export OTEL_TRACES_SAMPLER=parentbased_traceidratio
+export OTEL_TRACES_SAMPLER_ARG=0.01
+
+# 预发布环境（10% 采样）
+export OTEL_TRACES_SAMPLER=parentbased_traceidratio
+export OTEL_TRACES_SAMPLER_ARG=0.1
+
+# 开发环境（100% 采样）
+export OTEL_TRACES_SAMPLER=always_on
+
+# 智能采样（优先采样错误）
+# 实现自定义 ConfigurableSamplerProvider
+```
+
+##### 资源限制配置
+
+```bash
+# 限制 Span 属性数量（防止高基数）
+export OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT=32
+export OTEL_SPAN_EVENT_COUNT_LIMIT=32
+export OTEL_SPAN_LINK_COUNT_LIMIT=16
+
+# 限制属性值长度（防止大对象）
+export OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT=512
+
+# 限制 Metric 基数
+export OTEL_JAVA_METRICS_CARDINALITY_LIMIT=1000
+```
+
+##### 导出器性能调优
+
+```bash
+# OTLP gRPC 压缩
+export OTEL_EXPORTER_OTLP_COMPRESSION=gzip
+
+# 调整超时
+export OTEL_EXPORTER_OTLP_TIMEOUT=15000        # 15秒
+
+# Metric 导出间隔（降低频率）
+export OTEL_METRIC_EXPORT_INTERVAL=120000      # 2分钟
+```
+
+#### 6.3 生产环境配置
+
+##### 推荐的环境变量设置
+
+```bash
+# ============ 服务标识 ============
+export OTEL_SERVICE_NAME=my-microservice
+export OTEL_SERVICE_VERSION=1.2.3
+export OTEL_RESOURCE_ATTRIBUTES="deployment.environment=production,service.namespace=my-company,cloud.provider=aws,cloud.region=us-west-2"
+
+# ============ Traces 配置 ============
+export OTEL_TRACES_EXPORTER=otlp
+export OTEL_TRACES_SAMPLER=parentbased_traceidratio
+export OTEL_TRACES_SAMPLER_ARG=0.01              # 1% 采样
+
+# Span 批处理器
+export OTEL_BSP_SCHEDULE_DELAY=5000
+export OTEL_BSP_MAX_QUEUE_SIZE=4096
+export OTEL_BSP_MAX_EXPORT_BATCH_SIZE=1024
+export OTEL_BSP_EXPORT_TIMEOUT=30000
+
+# Span 限制
+export OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT=64
+export OTEL_SPAN_EVENT_COUNT_LIMIT=64
+export OTEL_SPAN_LINK_COUNT_LIMIT=32
+export OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT=1024
+
+# ============ Metrics 配置 ============
+export OTEL_METRICS_EXPORTER=otlp,prometheus
+export OTEL_METRIC_EXPORT_INTERVAL=60000
+export OTEL_METRICS_EXEMPLAR_FILTER=trace_based
+export OTEL_JAVA_METRICS_CARDINALITY_LIMIT=2000
+
+# Prometheus
+export OTEL_EXPORTER_PROMETHEUS_PORT=9464
+export OTEL_EXPORTER_PROMETHEUS_HOST=0.0.0.0
+
+# ============ Logs 配置 ============
+export OTEL_LOGS_EXPORTER=otlp
+
+# 日志批处理器
+export OTEL_BLRP_SCHEDULE_DELAY=1000
+export OTEL_BLRP_MAX_QUEUE_SIZE=2048
+export OTEL_BLRP_MAX_EXPORT_BATCH_SIZE=512
+
+# ============ OTLP 导出器配置 ============
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+export OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+export OTEL_EXPORTER_OTLP_COMPRESSION=gzip
+export OTEL_EXPORTER_OTLP_TIMEOUT=10000
+export OTEL_EXPORTER_OTLP_HEADERS="api-key=your-api-key"
+
+# ============ Propagators 配置 ============
+export OTEL_PROPAGATORS=tracecontext,baggage
+```
+
+##### 高可用配置
+
+**1. 使用多个导出器（容错）**:
+```bash
+# 主导出器 + 备份导出器
+export OTEL_TRACES_EXPORTER=otlp,logging
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://primary-collector:4317
+```
+
+**2. 增大队列和批大小**:
+```bash
+export OTEL_BSP_MAX_QUEUE_SIZE=8192
+export OTEL_BSP_MAX_EXPORT_BATCH_SIZE=2048
+```
+
+**3. 使用本地 Collector**:
+```bash
+# 导出到本地 Collector（降低网络延迟）
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+```
+
+##### 监控和告警
+
+**关键指标监控**:
+
+```java
+// 内置的 Metric 指标
+// - otel.span_processor.queue.size
+// - otel.span_processor.processed
+// - otel.span_processor.dropped
+// - otel.span_processor.export.duration
+
+// 使用 JMX 或 Prometheus 监控这些指标
+```
+
+**告警规则示例**:
+- `otel.span_processor.dropped > 100`: Span 丢失过多
+- `otel.span_processor.queue.size > 1500`: 队列接近满
+- `exporter_failure_rate > 0.05`: 导出失败率超过 5%
+
+##### 故障恢复
+
+**1. 优雅降级**:
+```java
+AutoConfiguredOpenTelemetrySdk.builder()
+    .addSpanExporterCustomizer((exporter, config) ->
+        new FallbackSpanExporter(exporter) {
+            @Override
+            public CompletableResultCode export(Collection<SpanData> spans) {
+                try {
+                    return super.export(spans);
+                } catch (Exception e) {
+                    logger.warn("Export failed, falling back to logging", e);
+                    return CompletableResultCode.ofSuccess();
+                }
+            }
+        })
+    .build();
+```
+
+**2. 断路器模式**:
+```java
+// 实现带断路器的导出器
+public class CircuitBreakerSpanExporter implements SpanExporter {
+    private final CircuitBreaker circuitBreaker;
+    private final SpanExporter delegate;
+
+    @Override
+    public CompletableResultCode export(Collection<SpanData> spans) {
+        if (circuitBreaker.isOpen()) {
+            logger.warn("Circuit breaker is open, skipping export");
+            return CompletableResultCode.ofSuccess();
+        }
+
+        try {
+            CompletableResultCode result = delegate.export(spans);
+            circuitBreaker.recordSuccess();
+            return result;
+        } catch (Exception e) {
+            circuitBreaker.recordFailure();
+            throw e;
+        }
+    }
+}
+```
+
+### 7. 扩展开发指南
+
+#### 7.1 自定义导出器开发
+
+##### 实现 ConfigurableSpanExporterProvider
+
+```java
+package com.example.exporter;
+
+import io.opentelemetry.sdk.autoconfigure.spi.ConfigProperties;
+import io.opentelemetry.sdk.autoconfigure.spi.traces.ConfigurableSpanExporterProvider;
+import io.opentelemetry.sdk.trace.export.SpanExporter;
+import io.opentelemetry.sdk.common.CompletableResultCode;
+import io.opentelemetry.sdk.trace.data.SpanData;
+
+import java.util.Collection;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * 自定义导出器提供者
+ */
+public class CustomSpanExporterProvider implements ConfigurableSpanExporterProvider {
+
+    @Override
+    public SpanExporter createExporter(ConfigProperties config) {
+        // 读取配置
+        String endpoint = config.getString("otel.exporter.custom.endpoint");
+        if (endpoint == null) {
+            throw new IllegalArgumentException("otel.exporter.custom.endpoint is required");
+        }
+
+        int timeout = config.getInt("otel.exporter.custom.timeout", 10000);
+        boolean compression = config.getBoolean("otel.exporter.custom.compression", false);
+
+        // 创建并返回导出器
+        return new CustomSpanExporter(endpoint, timeout, compression);
+    }
+
+    @Override
+    public String getName() {
+        // 返回导出器名称（用于 OTEL_TRACES_EXPORTER）
+        return "custom";
+    }
+}
+
+/**
+ * 自定义导出器实现
+ */
+class CustomSpanExporter implements SpanExporter {
+
+    private final String endpoint;
+    private final int timeoutMs;
+    private final boolean compression;
+
+    public CustomSpanExporter(String endpoint, int timeoutMs, boolean compression) {
+        this.endpoint = endpoint;
+        this.timeoutMs = timeoutMs;
+        this.compression = compression;
+    }
+
+    @Override
+    public CompletableResultCode export(Collection<SpanData> spans) {
+        CompletableResultCode result = new CompletableResultCode();
+
+        // 异步导出
+        CompletableFuture.runAsync(() -> {
+            try {
+                // 1. 序列化 Span
+                byte[] data = serializeSpans(spans);
+
+                // 2. 压缩（如果启用）
+                if (compression) {
+                    data = compress(data);
+                }
+
+                // 3. 发送到后端
+                boolean success = sendToBackend(endpoint, data, timeoutMs);
+
+                if (success) {
+                    result.succeed();
+                } else {
+                    result.fail();
+                }
+            } catch (Exception e) {
+                logger.error("Export failed", e);
+                result.fail();
+            }
+        });
+
+        return result;
+    }
+
+    @Override
+    public CompletableResultCode flush() {
+        // 刷新缓冲区（如果有）
+        return CompletableResultCode.ofSuccess();
+    }
+
+    @Override
+    public CompletableResultCode shutdown() {
+        // 关闭连接、释放资源
+        logger.info("Shutting down CustomSpanExporter");
+        return CompletableResultCode.ofSuccess();
+    }
+
+    private byte[] serializeSpans(Collection<SpanData> spans) {
+        // 序列化实现
+        return ...;
+    }
+
+    private byte[] compress(byte[] data) {
+        // 压缩实现
+        return ...;
+    }
+
+    private boolean sendToBackend(String endpoint, byte[] data, int timeout) {
+        // HTTP/gRPC 发送实现
+        return ...;
+    }
+}
+```
+
+##### 注册 SPI
+
+创建文件 `src/main/resources/META-INF/services/io.opentelemetry.sdk.autoconfigure.spi.traces.ConfigurableSpanExporterProvider`:
+
+```
+com.example.exporter.CustomSpanExporterProvider
+```
+
+##### 配置属性命名约定
+
+遵循以下命名规范：
+
+- **导出器特定配置**: `otel.exporter.<exporter-name>.*`
+  - 示例: `otel.exporter.custom.endpoint`
+  - 示例: `otel.exporter.custom.timeout`
+
+- **使用小写和点分隔**: `otel.exporter.mycustom.property.name`
+
+- **布尔值**: 使用 `true`/`false`
+- **时间间隔**: 支持毫秒数字或带单位字符串（`5000` 或 `5s`）
+
+##### 测试指南
+
+```java
+@Test
+public void testCustomSpanExporter() {
+    // 1. 准备配置
+    Map<String, String> config = new HashMap<>();
+    config.put("otel.service.name", "test-service");
+    config.put("otel.traces.exporter", "custom");
+    config.put("otel.exporter.custom.endpoint", "http://localhost:8080");
+
+    // 2. 构建 SDK
+    AutoConfiguredOpenTelemetrySdk sdk =
+        AutoConfiguredOpenTelemetrySdk.builder()
+            .addPropertiesSupplier(() -> config)
+            .build();
+
+    // 3. 创建 Span
+    Tracer tracer = sdk.getOpenTelemetrySdk().getTracer("test");
+    Span span = tracer.spanBuilder("test-span").startSpan();
+    span.end();
+
+    // 4. 等待导出
+    Thread.sleep(6000);
+
+    // 5. 验证（检查后端是否收到 Span）
+    // ...
+
+    // 6. 清理
+    sdk.getOpenTelemetrySdk().close();
+}
+```
+
+#### 7.2 自定义采样器开发
+
+##### 实现 ConfigurableSamplerProvider
+
+```java
+package com.example.sampler;
+
+import io.opentelemetry.sdk.autoconfigure.spi.ConfigProperties;
+import io.opentelemetry.sdk.autoconfigure.spi.traces.ConfigurableSamplerProvider;
+import io.opentelemetry.sdk.trace.samplers.Sampler;
+import io.opentelemetry.sdk.trace.samplers.SamplingResult;
+import io.opentelemetry.sdk.trace.samplers.SamplingDecision;
+import io.opentelemetry.api.common.Attributes;
+import io.opentelemetry.api.common.AttributeKey;
+import io.opentelemetry.api.trace.SpanKind;
+import io.opentelemetry.context.Context;
+import io.opentelemetry.sdk.trace.data.LinkData;
+
+import java.util.List;
+
+/**
+ * 自定义采样器提供者
+ */
+public class CustomSamplerProvider implements ConfigurableSamplerProvider {
+
+    @Override
+    public Sampler createSampler(ConfigProperties config) {
+        // 读取配置
+        double fallbackRate = config.getDouble("otel.traces.sampler.arg", 0.1);
+        boolean priorityEnabled = config.getBoolean("otel.traces.sampler.priority", true);
+
+        return new PrioritySampler(fallbackRate, priorityEnabled);
+    }
+
+    @Override
+    public String getName() {
+        return "priority";  // 使用: OTEL_TRACES_SAMPLER=priority
+    }
+}
+
+/**
+ * 优先级采样器：优先采样重要请求
+ */
+class PrioritySampler implements Sampler {
+
+    private final double fallbackRate;
+    private final boolean priorityEnabled;
+    private final Sampler fallbackSampler;
+
+    public PrioritySampler(double fallbackRate, boolean priorityEnabled) {
+        this.fallbackRate = fallbackRate;
+        this.priorityEnabled = priorityEnabled;
+        this.fallbackSampler = Sampler.traceIdRatioBased(fallbackRate);
+    }
+
+    @Override
+    public SamplingResult shouldSample(
+        Context parentContext,
+        String traceId,
+        String name,
+        SpanKind spanKind,
+        Attributes attributes,
+        List<LinkData> parentLinks) {
+
+        if (priorityEnabled) {
+            // 规则 1: 带有 priority 属性 → 100% 采样
+            Boolean priority = attributes.get(AttributeKey.booleanKey("priority"));
+            if (Boolean.TRUE.equals(priority)) {
+                return SamplingResult.create(SamplingDecision.RECORD_AND_SAMPLE);
+            }
+
+            // 规则 2: 错误请求 → 100% 采样
+            Boolean error = attributes.get(AttributeKey.booleanKey("error"));
+            if (Boolean.TRUE.equals(error)) {
+                return SamplingResult.create(SamplingDecision.RECORD_AND_SAMPLE);
+            }
+
+            // 规则 3: 特定端点 → 100% 采样
+            String endpoint = attributes.get(AttributeKey.stringKey("http.target"));
+            if ("/api/critical".equals(endpoint)) {
+                return SamplingResult.create(SamplingDecision.RECORD_AND_SAMPLE);
+            }
+        }
+
+        // 规则 4: 默认采样逻辑
+        return fallbackSampler.shouldSample(
+            parentContext, traceId, name, spanKind, attributes, parentLinks);
+    }
+
+    @Override
+    public String getDescription() {
+        return String.format("PrioritySampler{fallbackRate=%f, priorityEnabled=%b}",
+            fallbackRate, priorityEnabled);
+    }
+}
+```
+
+##### 采样决策逻辑
+
+采样器可以返回三种决策：
+
+1. **`RECORD_AND_SAMPLE`**: 记录并导出 Span
+2. **`RECORD_ONLY`**: 仅记录 Span，不导出
+3. **`DROP`**: 不记录也不导出
+
+##### 性能考虑
+
+- ✅ **快速决策**: `shouldSample()` 会被频繁调用，必须快速返回
+- ✅ **避免阻塞**: 不要执行 I/O 操作
+- ✅ **线程安全**: 采样器是线程共享的，必须线程安全
+- ✅ **无状态**: 避免维护状态，否则需要考虑并发问题
+
+##### 测试指南
+
+```java
+@Test
+public void testPrioritySampler() {
+    ConfigProperties config = DefaultConfigProperties.create(
+        Map.of("otel.traces.sampler.arg", "0.1"));
+
+    Sampler sampler = new PrioritySamplerProvider().createSampler(config);
+
+    // 测试优先级请求
+    Attributes priorityAttrs = Attributes.of(
+        AttributeKey.booleanKey("priority"), true);
+    SamplingResult result = sampler.shouldSample(
+        Context.root(), "trace-id", "test-span",
+        SpanKind.SERVER, priorityAttrs, Collections.emptyList());
+
+    assertEquals(SamplingDecision.RECORD_AND_SAMPLE, result.getDecision());
+
+    // 测试普通请求
+    Attributes normalAttrs = Attributes.empty();
+    // 由于使用 TraceId 比例采样，需要多次测试
+    int sampledCount = 0;
+    for (int i = 0; i < 1000; i++) {
+        result = sampler.shouldSample(
+            Context.root(), "trace-id-" + i, "test-span",
+            SpanKind.SERVER, normalAttrs, Collections.emptyList());
+        if (result.getDecision() == SamplingDecision.RECORD_AND_SAMPLE) {
+            sampledCount++;
+        }
+    }
+    // 应该接近 10% 采样率
+    assertTrue(sampledCount >= 50 && sampledCount <= 150);
+}
+```
+
+#### 7.3 自定义 Resource 提供者
+
+##### 实现 ResourceProvider
+
+```java
+package com.example.resource;
+
+import io.opentelemetry.sdk.autoconfigure.spi.ResourceProvider;
+import io.opentelemetry.sdk.autoconfigure.spi.ConfigProperties;
+import io.opentelemetry.sdk.resources.Resource;
+import io.opentelemetry.api.common.Attributes;
+import io.opentelemetry.api.common.AttributeKey;
+
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+
+/**
+ * Kubernetes 资源提供者
+ */
+public class KubernetesResourceProvider implements ResourceProvider {
+
+    @Override
+    public Resource createResource(ConfigProperties config) {
+        Attributes.Builder builder = Attributes.builder();
+
+        // 从环境变量读取 K8s 信息
+        String podName = System.getenv("POD_NAME");
+        if (podName != null) {
+            builder.put(AttributeKey.stringKey("k8s.pod.name"), podName);
+        }
+
+        String namespace = System.getenv("NAMESPACE");
+        if (namespace != null) {
+            builder.put(AttributeKey.stringKey("k8s.namespace.name"), namespace);
+        }
+
+        String deploymentName = System.getenv("DEPLOYMENT_NAME");
+        if (deploymentName != null) {
+            builder.put(AttributeKey.stringKey("k8s.deployment.name"), deploymentName);
+        }
+
+        // 从 Downward API 读取节点名称
+        String nodeName = readFromFile("/etc/podinfo/node-name");
+        if (nodeName != null) {
+            builder.put(AttributeKey.stringKey("k8s.node.name"), nodeName);
+        }
+
+        // 从配置读取集群名称
+        String clusterName = config.getString("otel.k8s.cluster.name");
+        if (clusterName != null) {
+            builder.put(AttributeKey.stringKey("k8s.cluster.name"), clusterName);
+        }
+
+        return Resource.create(builder.build());
+    }
+
+    @Override
+    public int order() {
+        // 在默认 ResourceProvider 之后执行
+        return 100;
+    }
+
+    private String readFromFile(String path) {
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(new FileInputStream(path)))) {
+            return reader.readLine();
+        } catch (IOException e) {
+            return null;
+        }
+    }
+}
+```
+
+##### 环境检测最佳实践
+
+**1. 使用条件检测**:
+```java
+@Override
+public Resource createResource(ConfigProperties config) {
+    // 只在 Kubernetes 环境中返回 Resource
+    if (!isRunningInKubernetes()) {
+        return Resource.empty();
+    }
+
+    // ... 创建 K8s Resource
+}
+
+private boolean isRunningInKubernetes() {
+    return System.getenv("KUBERNETES_SERVICE_HOST") != null;
+}
+```
+
+**2. 失败容错**:
+```java
+private String getMetadata(String endpoint) {
+    try {
+        // 尝试从 metadata 服务读取
+        return httpGet(endpoint);
+    } catch (Exception e) {
+        logger.debug("Failed to read metadata from " + endpoint, e);
+        return null;  // 失败时返回 null
+    }
+}
+```
+
+**3. 超时控制**:
+```java
+HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+conn.setConnectTimeout(100);  // 100ms 超时
+conn.setReadTimeout(100);
+```
+
+##### Ordered 接口使用
+
+`order()` 值决定执行顺序和属性覆盖优先级：
+
+```java
+// 执行顺序示例
+DefaultResourceProvider: order() = 0      // 最早执行
+EnvironmentResourceProvider: order() = 50  // 中间执行
+CustomResourceProvider: order() = 100      // 最晚执行（优先级最高）
+
+// 属性覆盖
+// 如果三个 Provider 都提供 "environment" 属性：
+// CustomResourceProvider 的值会覆盖其他两个
+```
+
+##### 测试指南
+
+```java
+@Test
+public void testKubernetesResourceProvider() {
+    // 模拟环境变量
+    Map<String, String> env = new HashMap<>();
+    env.put("POD_NAME", "my-pod-12345");
+    env.put("NAMESPACE", "production");
+
+    // 使用 SystemStub 或类似库设置环境变量
+    withEnvironmentVariables(env).execute(() -> {
+        ConfigProperties config = DefaultConfigProperties.createForTest(
+            Map.of("otel.k8s.cluster.name", "my-cluster"));
+
+        Resource resource = new KubernetesResourceProvider().createResource(config);
+
+        assertEquals("my-pod-12345",
+            resource.getAttribute(AttributeKey.stringKey("k8s.pod.name")));
+        assertEquals("production",
+            resource.getAttribute(AttributeKey.stringKey("k8s.namespace.name")));
+        assertEquals("my-cluster",
+            resource.getAttribute(AttributeKey.stringKey("k8s.cluster.name")));
+    });
+}
+```
+
+---
+
 ## 常见问题
 
 ### Q1: 环境变量未生效？
